@@ -1,0 +1,13 @@
+langgraph
+langchain
+langchain-openai
+langchain-chroma
+langchain-community
+chromadb
+openai
+pydantic
+networkx
+pymupdf
+arxiv
+python-dotenv
+tiktoken
