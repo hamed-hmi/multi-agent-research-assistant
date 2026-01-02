@@ -3,13 +3,21 @@ from typing import TypedDict, List
 from pydantic import BaseModel, Field
 
 
-class ArxivPaper(BaseModel):
-    """Represents a paper from ArXiv."""
+class Paper(BaseModel):
+    """Represents a paper from any source."""
     title: str
     summary: str
-    url: str
+    url: str = ""  # May be empty for WOS papers
+    doi: str = ""  # DOI for WOS papers
     published_date: str
     status: str = "unchecked"
+    source: str = "arxiv"  # "arxiv", "wos", or "both"
+    pdf_path: str = ""  # Local path to PDF if provided manually
+
+
+class ArxivPaper(Paper):
+    """Represents a paper from ArXiv (backward compatibility)."""
+    pass
 
 
 class SearchQueries(BaseModel):
@@ -38,10 +46,10 @@ class KnowledgeGraph(BaseModel):
 class AgentState(TypedDict):
     """State shared across all agent nodes."""
     topic: str
-    inclusion_criteria: str  # Optional: what papers should include
-    exclusion_criteria: str  # Optional: what papers should exclude
+    search_sources: List[str]  # ["arxiv"], ["wos"], or ["arxiv", "wos"]
     search_queries: List[str]
-    papers: List[ArxivPaper]
+    papers: List[Paper]
+    pdf_folder: str  # Folder path for manually provided PDFs
     taxonomy: str
     future_directions: str
     final_report: str

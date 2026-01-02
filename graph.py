@@ -6,6 +6,7 @@ from nodes import (
     planner_node,
     search_node,
     filter_node,
+    wos_pause_node,
     analyst_node,
     writer_node,
     reviewer_node,
@@ -26,6 +27,7 @@ def build_workflow() -> StateGraph:
     workflow.add_node("planner", planner_node)
     workflow.add_node("searcher", search_node)
     workflow.add_node("filter", filter_node)
+    workflow.add_node("wos_pause", wos_pause_node)
     workflow.add_node("analyst", analyst_node)
     workflow.add_node("writer", writer_node)
     workflow.add_node("reviewer", reviewer_node)
@@ -36,7 +38,8 @@ def build_workflow() -> StateGraph:
     # Add edges
     workflow.add_edge("planner", "searcher")
     workflow.add_edge("searcher", "filter")
-    workflow.add_edge("filter", "analyst")
+    workflow.add_edge("filter", "wos_pause")
+    workflow.add_edge("wos_pause", "analyst")
     workflow.add_edge("analyst", "writer")
     workflow.add_edge("writer", "reviewer")
     workflow.add_conditional_edges("reviewer", router, {"writer": "writer", END: END})

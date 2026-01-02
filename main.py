@@ -1,4 +1,5 @@
 """Main entry point for the Survey Agent system."""
+import os
 from graph import app
 
 # --- MAIN ---
@@ -15,27 +16,50 @@ if __name__ == "__main__":
         app.get_graph().print_ascii()
 
     # 2. Execution
-    topic = input("Enter topic: ")
+    topic = input("What is your specific target topic? ")
     
-    inclusion = input("Enter inclusion criteria (optional, press Enter to skip): ").strip()
-    if not inclusion:
-        inclusion = ""
+    # Ask for search sources
+    print("\nSearch Sources:")
+    print("  1. ArXiv only")
+    print("  2. Web of Science (WOS) only")
+    print("  3. Both ArXiv and WOS")
+    source_choice = input("Select search source (1/2/3, default=1): ").strip() or "1"
     
-    exclusion = input("Enter exclusion criteria (optional, press Enter to skip): ").strip()
-    if not exclusion:
-        exclusion = ""
+    search_sources = []
+    pdf_folder = ""
     
-    print(f"Starting Multi-Agent System for: {topic}...")
-    if inclusion:
-        print(f"  Inclusion criteria: {inclusion}")
-    if exclusion:
-        print(f"  Exclusion criteria: {exclusion}")
+    if source_choice == "1":
+        search_sources = ["arxiv"]
+    elif source_choice == "2":
+        search_sources = ["wos"]
+        pdf_folder = input("Enter folder path where you will place PDF files for WOS papers: ").strip()
+        if not pdf_folder:
+            pdf_folder = "./wos_pdfs"  # Default folder
+        if not os.path.exists(pdf_folder):
+            os.makedirs(pdf_folder, exist_ok=True)
+            print(f"   [INFO] Created folder: {pdf_folder}")
+    elif source_choice == "3":
+        search_sources = ["arxiv", "wos"]
+        pdf_folder = input("Enter folder path where you will place PDF files for WOS papers: ").strip()
+        if not pdf_folder:
+            pdf_folder = "./wos_pdfs"  # Default folder
+        if not os.path.exists(pdf_folder):
+            os.makedirs(pdf_folder, exist_ok=True)
+            print(f"   [INFO] Created folder: {pdf_folder}")
+    else:
+        print("   [WARNING] Invalid choice, defaulting to ArXiv only")
+        search_sources = ["arxiv"]
+    
+    print(f"\nStarting Multi-Agent System for: {topic}...")
+    print(f"  Search sources: {', '.join(search_sources)}")
+    if pdf_folder:
+        print(f"  PDF folder: {pdf_folder}")
     
     # Use invoke() to run to completion and get the final result
     final_state = app.invoke({
         "topic": topic,
-        "inclusion_criteria": inclusion,
-        "exclusion_criteria": exclusion,
+        "search_sources": search_sources,
+        "pdf_folder": pdf_folder,
         "revision_number": 0, 
         "reviewer_comments": "None",
         "review_status": "START"

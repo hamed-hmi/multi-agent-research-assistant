@@ -8,7 +8,8 @@ from langgraph.graph import END
 from models import AgentState, SearchQueries, ReviewDecision
 from config import llm
 from tools import (
-    search_arxiv, 
+    search_arxiv,
+    search_wos, 
     process_papers, 
     create_vectorstore,
     build_knowledge_graph,
@@ -19,7 +20,7 @@ from tools import (
 
 def planner_node(state: AgentState) -> dict:
     """
-    Generate sophisticated search queries with AND/OR logic based on topic and criteria.
+    Generate sophisticated search queries with AND/OR logic based on topic.
     
     Args:
         state: Current agent state
@@ -29,44 +30,31 @@ def planner_node(state: AgentState) -> dict:
     """
     print(f"\n--- PLANNER: Processing '{state['topic']}' ---")
     
-    # Build context for query generation
-    context_parts = [f"Topic: {state['topic']}"]
-    
-    if state.get('inclusion_criteria') and state['inclusion_criteria'].strip():
-        context_parts.append(f"Inclusion Criteria (MUST include): {state['inclusion_criteria']}")
-    
-    if state.get('exclusion_criteria') and state['exclusion_criteria'].strip():
-        context_parts.append(f"Exclusion Criteria (MUST NOT include): {state['exclusion_criteria']}")
-    
-    context = "\n".join(context_parts)
-    
-    system_msg = SystemMessage(content="""You are an expert at creating precise ArXiv search queries. 
-Generate a sophisticated search query that use boolean logic to precisely target the research focus.
+    system_msg = SystemMessage(content="""You are an expert at creating precise ArXiv and Web of Science search queries. 
+Generate a sophisticated search query that uses boolean logic to precisely target the research focus.
 
-ArXiv Query Syntax Rules:
+ArXiv/WOS Query Syntax Rules:
 - Space-separated terms are implicitly ANDed (e.g., "machine learning neural networks")
 - Use explicit "OR" for alternatives (e.g., "(transformer OR attention) language model")
 - Use "ANDNOT" to exclude terms (e.g., "transformer ANDNOT CNN")
 - Use parentheses to group logical operations
 - Terms can be quoted for exact phrases: "exact phrase"
-- For inclusion criteria: incorporate them with AND to ensure they're present
-- For exclusion criteria: use ANDNOT to explicitly exclude those topics
 - Make queries specific and focused, not generic
-- Each query should be a complete, valid ArXiv search string
+- Each query should be a complete, valid search string
 
-Example: If topic is "federated learning for channel estimation", inclusion is "RIS systems", exclusion is "Internet of Things":
-Query: "(channel estimation OR CSI estimation) AND (federated OR distributed OR FL) AND (RIS OR RIS-aided OR reconfigurable intelligent surface ) ANDNOT (IoT or Internet of Things)"
+Example: If topic is "federated learning for channel estimation":
+Query: "(channel estimation OR CSI estimation) AND (federated OR distributed OR FL)"
 
 """)
     
     structured_llm = llm.with_structured_output(SearchQueries)
-    result = structured_llm.invoke([system_msg, HumanMessage(content=context)])
+    result = structured_llm.invoke([system_msg, HumanMessage(content=f"Topic: {state['topic']}")])
     return {"search_queries": result.queries}
 
 
 def search_node(state: AgentState) -> dict:
     """
-    Search ArXiv for papers using the generated queries.
+    Search for papers using the specified sources (ArXiv, WOS, or both).
     
     Args:
         state: Current agent state
@@ -75,13 +63,33 @@ def search_node(state: AgentState) -> dict:
         Updated state with papers
     """
     print("\n--- SEARCHER: Fetching metadata ---")
-    papers = search_arxiv(state['search_queries'])
-    return {"papers": papers}
+    all_papers = []
+    sources = state.get('search_sources', ['arxiv'])
+    
+    if 'arxiv' in sources:
+        print("   -> Searching ArXiv...")
+        arxiv_papers = search_arxiv(state['search_queries'])
+        all_papers.extend(arxiv_papers)
+    
+    if 'wos' in sources:
+        print("   -> Searching Web of Science...")
+        wos_papers = search_wos(state['search_queries'])
+        all_papers.extend(wos_papers)
+        print(f"   [INFO] Found {len(wos_papers)} WOS papers. PDFs must be provided manually.")
+    
+    # Deduplicate by title (simple approach)
+    unique_papers = {}
+    for paper in all_papers:
+        title_key = paper.title.lower().strip()
+        if title_key not in unique_papers:
+            unique_papers[title_key] = paper
+    
+    return {"papers": list(unique_papers.values())}
 
 
 def filter_node(state: AgentState) -> dict:
     """
-    Filter papers based on relevance, inclusion/exclusion criteria, and exclude survey papers.
+    Filter papers based on relevance to topic and exclude survey papers.
     
     Args:
         state: Current agent state
@@ -91,17 +99,6 @@ def filter_node(state: AgentState) -> dict:
     """
     print("\n--- FILTER: Screening papers ---")
     filtered = []
-    
-    # Build criteria context
-    criteria_parts = [f"Topic: {state['topic']}"]
-    
-    if state.get('inclusion_criteria') and state['inclusion_criteria'].strip():
-        criteria_parts.append(f"MUST include: {state['inclusion_criteria']}")
-    
-    if state.get('exclusion_criteria') and state['exclusion_criteria'].strip():
-        criteria_parts.append(f"MUST NOT include: {state['exclusion_criteria']}")
-    
-    criteria_context = "\n".join(criteria_parts)
     
     for paper in state['papers']:
         # First check: Is this a survey/review paper? (We want research papers, not reviews)
@@ -121,17 +118,13 @@ Respond with ONLY 'YES' if it's a survey/review paper, or 'NO' if it's a researc
             print(f"   [SKIP - SURVEY] {paper.title[:40]}...")
             continue
         
-        # Second check: Does it meet inclusion/exclusion criteria?
-        relevance_prompt = f"""{criteria_context}
+        # Second check: Is it relevant to the topic?
+        relevance_prompt = f"""Topic: {state['topic']}
 
 Paper Title: {paper.title}
 Paper Abstract: {paper.summary}
 
-Evaluate if this paper:
-1. Is relevant to the topic
-2. Meets the inclusion criteria (if specified)
-3. Does NOT violate the exclusion criteria (if specified)
-4. Is a research paper (not a survey/review)
+Evaluate if this paper is relevant to the topic and is a research paper (not a survey/review).
 
 Respond with ONLY 'YES' if the paper should be included, or 'NO' if it should be excluded."""
         
@@ -144,6 +137,57 @@ Respond with ONLY 'YES' if the paper should be included, or 'NO' if it should be
             print(f"   [SKIP] {paper.title[:40]}...")
     
     return {"papers": filtered}
+
+
+def wos_pause_node(state: AgentState) -> dict:
+    """
+    Pause after filtering WOS papers to allow user to download PDFs.
+    Shows paper details and waits for user confirmation.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state (no changes, just pauses)
+    """
+    sources = state.get('search_sources', [])
+    papers = state['papers']
+    pdf_folder = state.get('pdf_folder', '')
+    
+    # Only pause if WOS is in sources and there are WOS papers
+    wos_papers = [p for p in papers if p.source == "wos"]
+    
+    if 'wos' in sources and wos_papers:
+        print("\n" + "="*80)
+        print("--- WOS PAPERS SELECTED - PDF DOWNLOAD REQUIRED ---")
+        print("="*80)
+        print(f"\nFound {len(wos_papers)} Web of Science papers after filtering.")
+        print(f"Please download the PDF files and place them in: {pdf_folder}")
+        print("\nSelected Papers:")
+        print("-"*80)
+        
+        for i, paper in enumerate(wos_papers, 1):
+            print(f"\n[{i}] {paper.title}")
+            if paper.doi:
+                print(f"    DOI: {paper.doi}")
+            if paper.published_date:
+                print(f"    Published: {paper.published_date}")
+            if paper.summary and paper.summary != "No abstract available via WOS API":
+                print(f"    Abstract: {paper.summary[:200]}...")
+            print()
+        
+        print("-"*80)
+        print(f"\nInstructions:")
+        print(f"1. Download the PDF files for the papers listed above")
+        print(f"2. Save them in the folder: {pdf_folder}")
+        print(f"3. Name the PDF files with keywords from the paper title for automatic matching")
+        print(f"4. Press Enter when you have finished downloading and placing the PDFs")
+        print("="*80)
+        
+        input("\nPress Enter when you are done downloading PDFs...")
+        print("\nContinuing with analysis...\n")
+    
+    return {}
 
 
 def analyst_node(state: AgentState) -> dict:
@@ -163,8 +207,9 @@ def analyst_node(state: AgentState) -> dict:
     if not papers: 
         return {"taxonomy": "None", "future_directions": "None"}
     
-    # 1. Download & Chunk
-    docs = process_papers(papers)
+    # 1. Download & Chunk (handles both ArXiv downloads and local PDFs)
+    pdf_folder = state.get('pdf_folder', '')
+    docs = process_papers(papers, pdf_folder)
     
     if not docs: 
         return {"taxonomy": "None", "future_directions": "None"}
