@@ -16,11 +16,26 @@ if __name__ == "__main__":
 
     # 2. Execution
     topic = input("Enter topic: ")
+    
+    inclusion = input("Enter inclusion criteria (optional, press Enter to skip): ").strip()
+    if not inclusion:
+        inclusion = ""
+    
+    exclusion = input("Enter exclusion criteria (optional, press Enter to skip): ").strip()
+    if not exclusion:
+        exclusion = ""
+    
     print(f"Starting Multi-Agent System for: {topic}...")
+    if inclusion:
+        print(f"  Inclusion criteria: {inclusion}")
+    if exclusion:
+        print(f"  Exclusion criteria: {exclusion}")
     
     # Use invoke() to run to completion and get the final result
     final_state = app.invoke({
-        "topic": topic, 
+        "topic": topic,
+        "inclusion_criteria": inclusion,
+        "exclusion_criteria": exclusion,
         "revision_number": 0, 
         "reviewer_comments": "None",
         "review_status": "START"

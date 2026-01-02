@@ -14,7 +14,7 @@ class ArxivPaper(BaseModel):
 
 class SearchQueries(BaseModel):
     """Structured output for search queries."""
-    queries: List[str] = Field(description="List of 3 distinct search queries")
+    queries: List[str] = Field(description="List of up to 3 distinct search queries")
 
 
 class ReviewDecision(BaseModel):
@@ -38,6 +38,8 @@ class KnowledgeGraph(BaseModel):
 class AgentState(TypedDict):
     """State shared across all agent nodes."""
     topic: str
+    inclusion_criteria: str  # Optional: what papers should include
+    exclusion_criteria: str  # Optional: what papers should exclude
     search_queries: List[str]
     papers: List[ArxivPaper]
     taxonomy: str

@@ -19,7 +19,7 @@ from tools import (
 
 def planner_node(state: AgentState) -> dict:
     """
-    Generate search queries based on the topic.
+    Generate sophisticated search queries with AND/OR logic based on topic and criteria.
     
     Args:
         state: Current agent state
@@ -28,9 +28,39 @@ def planner_node(state: AgentState) -> dict:
         Updated state with search_queries
     """
     print(f"\n--- PLANNER: Processing '{state['topic']}' ---")
+    
+    # Build context for query generation
+    context_parts = [f"Topic: {state['topic']}"]
+    
+    if state.get('inclusion_criteria') and state['inclusion_criteria'].strip():
+        context_parts.append(f"Inclusion Criteria (MUST include): {state['inclusion_criteria']}")
+    
+    if state.get('exclusion_criteria') and state['exclusion_criteria'].strip():
+        context_parts.append(f"Exclusion Criteria (MUST NOT include): {state['exclusion_criteria']}")
+    
+    context = "\n".join(context_parts)
+    
+    system_msg = SystemMessage(content="""You are an expert at creating precise ArXiv search queries. 
+Generate a sophisticated search query that use boolean logic to precisely target the research focus.
+
+ArXiv Query Syntax Rules:
+- Space-separated terms are implicitly ANDed (e.g., "machine learning neural networks")
+- Use explicit "OR" for alternatives (e.g., "(transformer OR attention) language model")
+- Use "ANDNOT" to exclude terms (e.g., "transformer ANDNOT CNN")
+- Use parentheses to group logical operations
+- Terms can be quoted for exact phrases: "exact phrase"
+- For inclusion criteria: incorporate them with AND to ensure they're present
+- For exclusion criteria: use ANDNOT to explicitly exclude those topics
+- Make queries specific and focused, not generic
+- Each query should be a complete, valid ArXiv search string
+
+Example: If topic is "federated learning for channel estimation", inclusion is "RIS systems", exclusion is "Internet of Things":
+Query: "(channel estimation OR CSI estimation) AND (federated OR distributed OR FL) AND (RIS OR RIS-aided OR reconfigurable intelligent surface ) ANDNOT (IoT or Internet of Things)"
+
+""")
+    
     structured_llm = llm.with_structured_output(SearchQueries)
-    system_msg = SystemMessage(content="Generate 3 academic search queries for ArXiv.")
-    result = structured_llm.invoke([system_msg, HumanMessage(content=state['topic'])])
+    result = structured_llm.invoke([system_msg, HumanMessage(content=context)])
     return {"search_queries": result.queries}
 
 
@@ -51,7 +81,7 @@ def search_node(state: AgentState) -> dict:
 
 def filter_node(state: AgentState) -> dict:
     """
-    Filter papers based on relevance to the topic.
+    Filter papers based on relevance, inclusion/exclusion criteria, and exclude survey papers.
     
     Args:
         state: Current agent state
@@ -61,15 +91,58 @@ def filter_node(state: AgentState) -> dict:
     """
     print("\n--- FILTER: Screening papers ---")
     filtered = []
+    
+    # Build criteria context
+    criteria_parts = [f"Topic: {state['topic']}"]
+    
+    if state.get('inclusion_criteria') and state['inclusion_criteria'].strip():
+        criteria_parts.append(f"MUST include: {state['inclusion_criteria']}")
+    
+    if state.get('exclusion_criteria') and state['exclusion_criteria'].strip():
+        criteria_parts.append(f"MUST NOT include: {state['exclusion_criteria']}")
+    
+    criteria_context = "\n".join(criteria_parts)
+    
     for paper in state['papers']:
-        prompt = f"Topic: {state['topic']}\nAbstract: {paper.summary}\nRelevant? YES/NO."
-        res = llm.invoke([HumanMessage(content=prompt)])
+        # First check: Is this a survey/review paper? (We want research papers, not reviews)
+        survey_check = f"""Is this paper a survey, review, or literature review paper?
+        
+Title: {paper.title}
+Abstract: {paper.summary}
+
+Look for keywords like: survey, review, literature review, systematic review, meta-analysis, state-of-the-art, comprehensive review.
+
+Respond with ONLY 'YES' if it's a survey/review paper, or 'NO' if it's a research paper."""
+        
+        survey_res = llm.invoke([HumanMessage(content=survey_check)])
+        is_survey = "YES" in survey_res.content.upper()
+        
+        if is_survey:
+            print(f"   [SKIP - SURVEY] {paper.title[:40]}...")
+            continue
+        
+        # Second check: Does it meet inclusion/exclusion criteria?
+        relevance_prompt = f"""{criteria_context}
+
+Paper Title: {paper.title}
+Paper Abstract: {paper.summary}
+
+Evaluate if this paper:
+1. Is relevant to the topic
+2. Meets the inclusion criteria (if specified)
+3. Does NOT violate the exclusion criteria (if specified)
+4. Is a research paper (not a survey/review)
+
+Respond with ONLY 'YES' if the paper should be included, or 'NO' if it should be excluded."""
+        
+        res = llm.invoke([HumanMessage(content=relevance_prompt)])
         if "YES" in res.content.upper():
             paper.status = "kept"
             filtered.append(paper)
             print(f"   [KEPT] {paper.title[:40]}...")
         else:
             print(f"   [SKIP] {paper.title[:40]}...")
+    
     return {"papers": filtered}
 
 
