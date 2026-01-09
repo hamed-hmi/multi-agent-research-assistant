@@ -25,6 +25,12 @@ class SearchQueries(BaseModel):
     queries: List[str] = Field(description="List of up to 3 distinct search queries")
 
 
+class DualSearchQueries(BaseModel):
+    """Structured output for survey and research queries."""
+    survey_queries: List[str] = Field(description="List of queries to find survey/review papers")
+    research_queries: List[str] = Field(description="List of queries to find research papers")
+
+
 class ReviewDecision(BaseModel):
     """Review decision with feedback."""
     decision: str = Field(description="Strictly 'PASS' or 'FAIL'")
@@ -47,10 +53,17 @@ class AgentState(TypedDict):
     """State shared across all agent nodes."""
     topic: str
     search_sources: List[str]  # ["arxiv"], ["wos"], or ["arxiv", "wos"]
-    search_queries: List[str]
-    papers: List[Paper]
+    search_queries: List[str]  # Legacy field, kept for compatibility
+    survey_queries: List[str]  # Queries for finding survey papers
+    research_queries: List[str]  # Queries for finding research papers
+    papers: List[Paper]  # Legacy field, kept for compatibility
+    survey_papers: List[Paper]  # Papers identified as surveys
+    target_papers: List[Paper]  # Validated research papers
     pdf_folder: str  # Folder path for manually provided PDFs
-    taxonomy: str
+    taxonomy: str  # Legacy field, kept for compatibility
+    extracted_taxonomies: List[dict]  # Extracted taxonomies from survey papers: [{"source_paper": str, "taxonomy": str}]
+    taxonomy_json: str  # Final taxonomy in JSON format
+    organized_papers: dict  # Papers organized by taxonomy category: {category: [paper1, paper2, ...]}
     future_directions: str
     final_report: str
     revision_number: int

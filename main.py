@@ -60,11 +60,53 @@ if __name__ == "__main__":
         "topic": topic,
         "search_sources": search_sources,
         "pdf_folder": pdf_folder,
+        "search_queries": [],  # Legacy field
+        "survey_queries": [],  # Will be set by planner
+        "research_queries": [],  # Will be set by planner
+        "papers": [],  # Legacy field
+        "survey_papers": [],  # Will be populated by parallel_search
+        "target_papers": [],  # Will be populated by parallel_search
+        "taxonomy": "",  # Legacy field
+        "extracted_taxonomies": [],  # Will be set by taxonomy_extractor
+        "taxonomy_json": "",  # Will be set by taxonomy_designer
+        "organized_papers": {},  # Will be set by sorter
         "revision_number": 0, 
         "reviewer_comments": "None",
         "review_status": "START"
     })
     
-    print("\n\n================ FINAL REPORT ================\n")
-    print(final_state['final_report'])
-    print("\n==============================================")
+    print("\n\n" + "="*80)
+    print("==================== FINAL RESULTS ====================")
+    print("="*80)
+    
+    # Display Taxonomy
+    if final_state.get('taxonomy_json'):
+        print("\n--- TAXONOMY (JSON) ---")
+        print(final_state['taxonomy_json'])
+    else:
+        print("\n--- TAXONOMY ---")
+        print("No taxonomy generated.")
+    
+    # Display Organized Papers
+    organized_papers = final_state.get('organized_papers', {})
+    if organized_papers:
+        print("\n--- ORGANIZED PAPERS BY CATEGORY ---")
+        for category, papers in organized_papers.items():
+            print(f"\n[{category}] ({len(papers)} papers)")
+            for i, paper in enumerate(papers, 1):
+                print(f"  {i}. {paper.title}")
+                if paper.doi:
+                    print(f"     DOI: {paper.doi}")
+    else:
+        print("\n--- ORGANIZED PAPERS ---")
+        print("No papers organized.")
+    
+    # Display Summary
+    print("\n--- SUMMARY ---")
+    print(f"Survey Papers Found: {len(final_state.get('survey_papers', []))}")
+    print(f"Target Papers Validated: {len(final_state.get('target_papers', []))}")
+    print(f"Categories Created: {len(organized_papers)}")
+    total_organized = sum(len(papers) for papers in organized_papers.values())
+    print(f"Total Papers Organized: {total_organized}")
+    
+    print("\n" + "="*80)
