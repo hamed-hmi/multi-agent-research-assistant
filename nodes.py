@@ -84,9 +84,9 @@ def parallel_search_node(state: AgentState) -> dict:
     survey_queries = state.get('survey_queries', [])
     if survey_queries:
         if 'arxiv' in sources:
-                print("   -> Searching ArXiv for surveys...")
-                arxiv_surveys = search_arxiv(survey_queries, max_results=5)
-                survey_papers.extend(arxiv_surveys)
+            print("   -> Searching ArXiv for surveys...")
+            arxiv_surveys = search_arxiv(survey_queries, max_results=5)
+            survey_papers.extend(arxiv_surveys)
         
         if 'wos' in sources:
             print("   -> Searching Web of Science for surveys...")
@@ -102,8 +102,8 @@ def parallel_search_node(state: AgentState) -> dict:
             print("   -> Searching ArXiv for research papers...")
             arxiv_research = search_arxiv(research_queries, max_results=10)
             research_papers.extend(arxiv_research)
-    
-    if 'wos' in sources:
+        
+        if 'wos' in sources:
             print("   -> Searching Web of Science for research papers...")
             wos_research = search_wos(research_queries, max_results=10)
             research_papers.extend(wos_research)

@@ -1,5 +1,6 @@
 """Utility tools for searching, downloading, and processing papers."""
 import os
+import time
 import requests
 import fitz  # PyMuPDF
 import arxiv
@@ -18,10 +19,14 @@ from sk import wos_sk
 WOS_API_KEY = wos_sk
 WOS_BASE_URL = "https://api.clarivate.com/api/wos"
 
+# Rate limiting: Track last WOS API call time to enforce 1 query per second limit
+_last_wos_call_time = 0.0
+
 
 def search_wos(queries: List[str], max_results: int = 3) -> List[Paper]:
     """
     Search Web of Science for papers using the WOS Starter API.
+    Includes rate limiting to respect the 1 query per second API limit.
     
     Args:
         queries: List of search query strings
@@ -30,6 +35,8 @@ def search_wos(queries: List[str], max_results: int = 3) -> List[Paper]:
     Returns:
         List of unique Paper objects
     """
+    global _last_wos_call_time
+    
     found_papers = []
     # Standard endpoint for the structure you provided (WOS Starter API)
     search_url = "https://api.clarivate.com/apis/wos-starter/v1/documents"
@@ -39,7 +46,16 @@ def search_wos(queries: List[str], max_results: int = 3) -> List[Paper]:
         "Accept": "application/json"
     }
     
-    for query in queries:
+    for i, query in enumerate(queries):
+        # Rate limiting: ensure at least 1.1 seconds between any WOS API calls
+        current_time = time.time()
+        time_since_last_call = current_time - _last_wos_call_time
+        
+        if time_since_last_call < 1.1:
+            wait_time = 1.1 - time_since_last_call
+            print(f"   [RATE LIMIT] Waiting {wait_time:.2f} seconds before WOS query...")
+            time.sleep(wait_time)
+        
         print(f"   -> Searching Web of Science for: {query}")
         
         try:
@@ -51,6 +67,9 @@ def search_wos(queries: List[str], max_results: int = 3) -> List[Paper]:
             }
             
             response = requests.get(search_url, headers=headers, params=params, timeout=30)
+            
+            # Update last call time after making the API request
+            _last_wos_call_time = time.time()
             
             if response.status_code == 200:
                 data = response.json()
