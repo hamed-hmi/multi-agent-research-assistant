@@ -1,6 +1,7 @@
 """Graph nodes for the Survey Agent workflow."""
 import os
 import json
+import re
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -20,22 +21,43 @@ from tools import (
 )
 
 
-def planner_node(state: AgentState) -> dict:
+def initial_split_node(state: AgentState) -> dict:
     """
-    Generate sophisticated search queries for both survey papers and research papers.
+    Initial pass-through node that allows both query planners to start.
+    This node does nothing but allows the graph to split into parallel paths.
     
     Args:
         state: Current agent state
         
     Returns:
-        Updated state with survey_queries and research_queries
+        Empty dict (pass-through)
     """
-    print(f"\n--- PLANNER: Processing '{state['topic']}' ---")
+    print("\n--- INITIAL SPLIT: Starting parallel query generation paths ---")
+    return {}
+
+
+def survey_query_planner_node(state: AgentState) -> dict:
+    """
+    Generate search queries specifically for survey papers.
+    Can accept feedback to regenerate queries with broader scope.
     
-    system_msg = SystemMessage(content="""You are an expert at creating precise ArXiv and Web of Science search queries. 
-Generate two sets of queries:
-1. Survey queries: To find survey, review, and literature review papers
-2. Research queries: To find original research papers (NOT surveys)
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with survey_queries
+    """
+    print(f"\n--- SURVEY QUERY PLANNER: Generating survey queries for '{state['topic']}' ---")
+    
+    # Check if there's feedback for survey queries
+    survey_feedback = state.get('survey_query_feedback', '')
+    is_retry = bool(survey_feedback)
+    previous_queries = state.get('survey_queries', [])
+    
+    if is_retry:
+        print("   [RETRY] Regenerating survey queries with broader scope based on feedback")
+    
+    system_msg_content = """You are an expert at creating precise ArXiv and Web of Science search queries for finding survey, review, and literature review papers.
 
 ArXiv/WOS Query Syntax Rules:
 - Space-separated terms are implicitly ANDed (e.g., "machine learning neural networks")
@@ -47,67 +69,237 @@ ArXiv/WOS Query Syntax Rules:
 - Each query should be a complete, valid search string
 
 For Survey Queries: Include terms like "survey", "review", "systematic review", "literature review", "state-of-the-art", "comprehensive review"
-For Research Queries: Use the topic directly, but EXCLUDE survey/review terms
-
+Generate 3 queries, and try to target survey papers that could be helpful to look at to write a new survey paper on the topic.
 Example: If topic is "federated learning for channel estimation":
-Survey Query: "(federated learning OR distributed learning) AND (channel estimation OR CSI estimation) AND (survey OR review OR literature review)"
-Research Query: "(channel estimation OR CSI estimation) AND (federated OR distributed OR FL) ANDNOT (survey OR review OR literature review)"
+Query 1: "(federated learning OR distributed learning) AND (channel estimation OR CSI estimation) AND (survey OR review OR literature review)"
+Query 2: "(federated learning OR distributed learning) AND (telecomunication OR wireless systems) AND (survey OR review OR literature review)"
+Query 3: "(deep learning OR neural networks) AND (channel estimation OR CSI estimation) AND (survey OR review OR literature review)"
 
-""")
+
+"""
     
-    structured_llm = llm.with_structured_output(DualSearchQueries)
-    result = structured_llm.invoke([system_msg, HumanMessage(content=f"Topic: {state['topic']}")])
+    # Add feedback instructions if this is a retry
+    if is_retry:
+        previous_queries_text = "\n".join([f"- {q}" for q in previous_queries]) if previous_queries else "None"
+        system_msg_content += f"""
+IMPORTANT: You are regenerating survey queries because the previous queries returned too few results.
+
+Previous queries that didn't work well:
+{previous_queries_text}
+
+Previous feedback: {survey_feedback}
+
+The goal is to find helpful survey papers that cover related topics, even if not exactly matching the specific topic.
+Generate NEW queries that are broader than the previous ones - consider related domains, more general terms, and parent domains.
+"""
+    
+    system_msg = SystemMessage(content=system_msg_content)
+    
+    user_content = f"Topic: {state['topic']}"
+    if is_retry:
+        user_content += f"\n\nPrevious survey queries returned insufficient results. Please generate broader survey queries."
+    
+    structured_llm = llm.with_structured_output(SearchQueries)
+    result = structured_llm.invoke([system_msg, HumanMessage(content=user_content)])
+    
+    # Reset feedback after using it
     return {
-        "survey_queries": result.survey_queries,
-        "research_queries": result.research_queries,
-        "search_queries": result.research_queries  # Legacy compatibility
+        "survey_queries": result.queries,
+        "survey_query_feedback": ""  # Clear feedback after use
     }
 
 
-def parallel_search_node(state: AgentState) -> dict:
+def research_query_planner_node(state: AgentState) -> dict:
     """
-    Search for both survey papers and research papers in parallel.
+    Generate search queries specifically for research papers (target papers).
+    This runs once and doesn't need feedback since scope is user-defined.
     
     Args:
         state: Current agent state
         
     Returns:
-        Updated state with survey_papers and target_papers (initial separation)
+        Updated state with research_queries
     """
-    print("\n--- PARALLEL SEARCHER: Fetching metadata for both tracks ---")
+    print(f"\n--- RESEARCH QUERY PLANNER: Generating research queries for '{state['topic']}' ---")
+    
+    system_msg_content = """You are an expert at creating precise ArXiv and Web of Science search queries for finding original research papers (NOT surveys or reviews).
+
+ArXiv/WOS Query Syntax Rules:
+- Space-separated terms are implicitly ANDed (e.g., "machine learning neural networks")
+- Use explicit "OR" for alternatives (e.g., "(transformer OR attention) language model")
+- Use "ANDNOT" to exclude terms (e.g., "transformer ANDNOT CNN")
+- Use parentheses to group logical operations
+- Terms can be quoted for exact phrases: "exact phrase"
+- Make queries specific and focused, not generic
+- Each query should be a complete, valid search string
+
+For Research Queries: Use the topic directly, but EXCLUDE survey/review terms
+
+Example: If topic is "federated learning for channel estimation":
+Research Query: "(channel estimation OR CSI estimation) AND (federated OR distributed OR FL) ANDNOT (survey OR review OR literature review)"
+
+"""
+    
+    system_msg = SystemMessage(content=system_msg_content)
+    user_content = f"Topic: {state['topic']}"
+    
+    structured_llm = llm.with_structured_output(SearchQueries)
+    result = structured_llm.invoke([system_msg, HumanMessage(content=user_content)])
+    
+    return {
+        "research_queries": result.queries,
+        "search_queries": result.queries  # Legacy compatibility
+    }
+
+
+def survey_feedback_check_node(state: AgentState) -> dict:
+    """
+    Check if enough survey papers were found and provide feedback if needed.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with survey_query_feedback if needed, or empty dict to continue
+    """
+    print("\n--- SURVEY FEEDBACK CHECK: Evaluating survey paper count ---")
+    survey_papers = state.get('survey_papers', [])
+    min_survey_papers = state.get('min_survey_papers', 5)  # Default threshold
+    survey_query_retry_count = state.get('survey_query_retry_count', 0)
+    max_retries = state.get('max_survey_query_retries', 2)  # Max retries to avoid infinite loops
+    
+    print(f"   [INFO] Found {len(survey_papers)} survey papers (minimum needed: {min_survey_papers})")
+    print(f"   [INFO] Retry count: {survey_query_retry_count}/{max_retries}")
+    
+    if len(survey_papers) >= min_survey_papers:
+        print("   [SUCCESS] Enough survey papers found, continuing...")
+        return {}  # Continue normally
+    
+    if survey_query_retry_count >= max_retries:
+        print(f"   [WARNING] Max retries reached ({max_retries}). Continuing with {len(survey_papers)} survey papers.")
+        return {}  # Continue anyway to avoid infinite loop
+    
+    # Generate simple feedback message - the planner's LLM will figure out how to broaden
+    feedback = f"""Previous queries returned only {len(survey_papers)} survey papers, but we need at least {min_survey_papers}. Please broaden the search scope significantly - include related domains, use more general terms, and consider parent domains that might contain relevant surveys."""
+    
+    print(f"   [FEEDBACK] Setting feedback for query refinement")
+    print(f"   [ACTION] Will retry with broader queries (attempt {survey_query_retry_count + 1})")
+    
+    return {
+        "survey_query_feedback": feedback,
+        "survey_query_retry_count": survey_query_retry_count + 1,
+        "survey_papers": []  # Clear current survey papers to retry search
+    }
+
+
+def survey_feedback_router(state: AgentState) -> str:
+    """
+    Route based on survey feedback check.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        "survey_query_planner" if retry needed, "survey_selector" if enough papers found
+    """
+    survey_query_feedback = state.get('survey_query_feedback', '')
+    
+    if survey_query_feedback:
+        return "survey_query_planner"  # Retry with feedback
+    else:
+        return "survey_selector"  # Continue to selection (with validation)
+
+
+def target_paper_termination_check_node(state: AgentState) -> dict:
+    """
+    Check if enough target papers were found. If less than 2, terminate with user message.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with termination message if needed
+    """
+    print("\n--- TARGET PAPER TERMINATION CHECK: Evaluating target paper count ---")
+    target_papers = state.get('target_papers', [])
+    min_target_papers = 2
+    
+    print(f"   [INFO] Found {len(target_papers)} target papers (minimum needed: {min_target_papers})")
+    
+    if len(target_papers) >= min_target_papers:
+        print("   [SUCCESS] Enough target papers found, continuing...")
+        return {}  # Continue normally
+    
+    # Generate alternative topic suggestion
+    topic = state.get('topic', '')
+    suggestion_prompt = f"""The search for research papers on the topic "{topic}" returned only {len(target_papers)} relevant papers, which is insufficient (need at least {min_target_papers}).
+
+Suggest 2-3 alternative, broader research topics that are related but might have more available papers. The suggestions should be:
+- Related to the original topic
+- Broader in scope to increase paper availability
+- Still relevant and useful for research
+
+Provide the suggestions as a concise list."""
+    
+    res = llm.invoke([HumanMessage(content=suggestion_prompt)])
+    suggestions = res.content.strip()
+    
+    termination_message = f"""
+{'='*80}
+INSUFFICIENT PAPERS FOUND
+{'='*80}
+
+Topic: {topic}
+Found Papers: {len(target_papers)}
+Required Minimum: {min_target_papers}
+
+Unfortunately, there are not enough research papers available for the specific topic "{topic}".
+
+SUGGESTED ALTERNATIVE TOPICS:
+{suggestions}
+
+Please try running the survey agent with one of these alternative topics, or provide a broader topic that might have more available papers.
+
+{'='*80}
+"""
+    
+    print(termination_message)
+    
+    return {
+        "termination_message": termination_message,
+        "workflow_terminated": True
+    }
+
+
+def survey_search_node(state: AgentState) -> dict:
+    """
+    Search for survey papers only.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with survey_papers
+    """
+    print("\n--- SURVEY SEARCHER: Fetching survey paper metadata ---")
     sources = state.get('search_sources', ['arxiv'])
     survey_papers = []
-    research_papers = []
     
-    # Search for survey papers
-    print("\n   [SURVEY TRACK] Searching for survey papers...")
     survey_queries = state.get('survey_queries', [])
-    if survey_queries:
-        if 'arxiv' in sources:
-            print("   -> Searching ArXiv for surveys...")
-            arxiv_surveys = search_arxiv(survey_queries, max_results=5)
-            survey_papers.extend(arxiv_surveys)
-        
-        if 'wos' in sources:
-            print("   -> Searching Web of Science for surveys...")
-            wos_surveys = search_wos(survey_queries, max_results=5)
-            survey_papers.extend(wos_surveys)
-            print(f"   [INFO] Found {len(wos_surveys)} WOS survey papers. PDFs must be provided manually.")
+    if not survey_queries:
+        print("   [WARNING] No survey queries found")
+        return {"survey_papers": []}
     
-    # Search for research papers
-    print("\n   [PAPER TRACK] Searching for research papers...")
-    research_queries = state.get('research_queries', [])
-    if research_queries:
-        if 'arxiv' in sources:
-            print("   -> Searching ArXiv for research papers...")
-            arxiv_research = search_arxiv(research_queries, max_results=10)
-            research_papers.extend(arxiv_research)
-        
-        if 'wos' in sources:
-            print("   -> Searching Web of Science for research papers...")
-            wos_research = search_wos(research_queries, max_results=10)
-            research_papers.extend(wos_research)
-            print(f"   [INFO] Found {len(wos_research)} WOS research papers. PDFs must be provided manually.")
+    if 'arxiv' in sources:
+        print("   -> Searching ArXiv for surveys...")
+        arxiv_surveys = search_arxiv(survey_queries, max_results=5)
+        survey_papers.extend(arxiv_surveys)
+    
+    if 'wos' in sources:
+        print("   -> Searching Web of Science for surveys...")
+        wos_surveys = search_wos(survey_queries, max_results=5)
+        survey_papers.extend(wos_surveys)
+        print(f"   [INFO] Found {len(wos_surveys)} WOS survey papers. PDFs must be provided manually.")
     
     # Deduplicate by title
     unique_surveys = {}
@@ -116,16 +308,53 @@ def parallel_search_node(state: AgentState) -> dict:
         if title_key not in unique_surveys:
             unique_surveys[title_key] = paper
     
+    print(f"\n   [SUMMARY] Found {len(unique_surveys)} unique survey papers")
+    
+    return {
+        "survey_papers": list(unique_surveys.values())
+    }
+
+
+def research_search_node(state: AgentState) -> dict:
+    """
+    Search for research papers only.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with target_papers (initial list before validation)
+    """
+    print("\n--- RESEARCH SEARCHER: Fetching research paper metadata ---")
+    sources = state.get('search_sources', ['arxiv'])
+    research_papers = []
+    
+    research_queries = state.get('research_queries', [])
+    if not research_queries:
+        print("   [WARNING] No research queries found")
+        return {"target_papers": [], "papers": []}
+    
+    if 'arxiv' in sources:
+        print("   -> Searching ArXiv for research papers...")
+        arxiv_research = search_arxiv(research_queries, max_results=10)
+        research_papers.extend(arxiv_research)
+    
+    if 'wos' in sources:
+        print("   -> Searching Web of Science for research papers...")
+        wos_research = search_wos(research_queries, max_results=10)
+        research_papers.extend(wos_research)
+        print(f"   [INFO] Found {len(wos_research)} WOS research papers. PDFs must be provided manually.")
+    
+    # Deduplicate by title
     unique_research = {}
     for paper in research_papers:
         title_key = paper.title.lower().strip()
         if title_key not in unique_research:
             unique_research[title_key] = paper
     
-    print(f"\n   [SUMMARY] Found {len(unique_surveys)} unique survey papers and {len(unique_research)} unique research papers")
+    print(f"\n   [SUMMARY] Found {len(unique_research)} unique research papers")
     
     return {
-        "survey_papers": list(unique_surveys.values()),
         "target_papers": list(unique_research.values()),
         "papers": list(unique_research.values())  # Legacy compatibility
     }
@@ -159,7 +388,7 @@ Title: {paper.title}
 Abstract: {paper.summary}
 
 Check:
-1. Is it actually a survey/review paper? (Look for keywords: survey, review, literature review, systematic review, state-of-the-art)
+1. Is it actually a survey/review paper? 
 2. Is it relevant to the topic?
 3. Does it appear to have a taxonomy, classification, or structured organization?
 4. Is it of reasonable quality? (Not too old, not too brief)
@@ -177,9 +406,198 @@ Respond with ONLY 'YES' if it should be kept, or 'NO' if it should be excluded."
     return {"survey_papers": validated}
 
 
+def survey_validation_feedback_check_node(state: AgentState) -> dict:
+    """
+    Check if enough validated survey papers were found after selection and validation.
+    If less than 3 validated surveys, provide feedback to retry with broader queries.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with survey_query_feedback if needed, or empty dict to continue
+    """
+    print("\n--- SURVEY VALIDATION FEEDBACK CHECK: Evaluating selected and validated survey count ---")
+    validated_surveys = state.get('survey_papers', [])
+    min_validated_surveys = state.get('min_validated_surveys', 3)  # Default threshold: 3
+    survey_query_retry_count = state.get('survey_query_retry_count', 0)
+    max_retries = state.get('max_survey_query_retries', 2)  # Max retries to avoid infinite loops
+    
+    print(f"   [INFO] Selected and validated {len(validated_surveys)} survey papers (minimum needed: {min_validated_surveys})")
+    print(f"   [INFO] Retry count: {survey_query_retry_count}/{max_retries}")
+    
+    if len(validated_surveys) >= min_validated_surveys:
+        print("   [SUCCESS] Enough validated survey papers found, continuing...")
+        return {}  # Continue normally
+    
+    if survey_query_retry_count >= max_retries:
+        print(f"   [WARNING] Max retries reached ({max_retries}). Continuing with {len(validated_surveys)} validated survey papers.")
+        return {}  # Continue anyway to avoid infinite loop
+    
+    # Generate simple feedback message - the planner's LLM will figure out how to broaden
+    previous_queries = state.get('survey_queries', [])
+    feedback = f"""Previous queries returned only {len(validated_surveys)} valid survey/review papers, but we need at least {min_validated_surveys}. The selected papers must be: (1) actually survey/review papers, (2) relevant to the topic, and (3) of sufficient quality. Please broaden the search scope - include related domains, use more general terms, and consider parent domains that might contain relevant surveys."""
+    
+    print(f"   [FEEDBACK] Setting feedback for query refinement")
+    print(f"   [ACTION] Will retry with broader queries (attempt {survey_query_retry_count + 1})")
+    
+    return {
+        "survey_query_feedback": feedback,
+        "survey_query_retry_count": survey_query_retry_count + 1,
+        "survey_papers": []  # Clear current survey papers to retry search
+    }
+
+
+def survey_validation_feedback_router(state: AgentState) -> str:
+    """
+    Route based on survey validation feedback check (after selector).
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        "survey_query_planner" if retry needed, "taxonomy_extractor" if enough validated surveys
+    """
+    survey_query_feedback = state.get('survey_query_feedback', '')
+    
+    if survey_query_feedback:
+        return "survey_query_planner"  # Retry with feedback
+    else:
+        return "taxonomy_extractor"  # Continue to taxonomy extraction
+
+
+def survey_selector_node(state: AgentState) -> dict:
+    """
+    Select and validate the top 3 survey papers based on:
+    1. Usefulness for writing a survey paper on the topic
+    2. Ability to help find/extract taxonomy
+    3. Recency (more recent papers are preferred)
+    4. Complementarity (papers should work together)
+    
+    During selection, validates that papers are actually review/survey papers.
+    If fewer than 3 valid review papers are found, sets feedback flag for retry.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with top 3 selected and validated survey_papers
+    """
+    print("\n--- SURVEY SELECTOR: Selecting and validating top 3 surveys ---")
+    survey_papers = state.get('survey_papers', [])
+    topic = state.get('topic', '')
+    
+    if not survey_papers:
+        print("   [WARNING] No survey papers to select from")
+        return {"survey_papers": []}
+    
+    print(f"   [INFO] Selecting top 3 from {len(survey_papers)} survey papers")
+    
+    # Prepare paper information with publication year
+    papers_info = []
+    for i, paper in enumerate(survey_papers):
+        # Extract year from published_date (could be full date or just year)
+        pub_date = paper.published_date
+        year = "Unknown"
+        if pub_date:
+            # Try to extract year from date string
+            year_match = re.search(r'\d{4}', pub_date)
+            if year_match:
+                year = year_match.group(0)
+        
+        papers_info.append({
+            "index": i,
+            "title": paper.title,
+            "abstract": paper.summary[:500] if paper.summary else "No abstract",
+            "year": year,
+            "source": paper.source
+        })
+    
+    papers_list = "\n\n".join([
+        f"[{p['index']}] Title: {p['title']}\n"
+        f"    Abstract: {p['abstract']}\n"
+        f"    Published: {p['year']} ({p['source']})"
+        for p in papers_info
+    ])
+    
+    selection_prompt = f"""You need to select 3 survey/review papers from the following papers. These papers will be used to:
+1. Write a new survey paper on the topic: "{topic}"
+2. Extract and learn from their taxonomy structures to design a taxonomy for the new survey
+
+CRITICAL REQUIREMENTS - DO NOT SELECT PAPERS THAT:
+- Are NOT survey/review papers 
+- Are NOT relevant to the topic
+
+
+
+Topic: {topic}
+
+Survey Papers:
+{papers_list}
+
+
+Think about:
+- Which papers are actually surveys/reviews AND relevant to the topic?
+- Which 3 papers together would give the best overall coverage?
+- Which combination avoids redundancy and maximizes diversity?
+- Which set of taxonomies would be most useful to learn from and combine?
+
+If you cannot find 3 valid survey/review papers that meet ALL the requirements above, select the best available ones that are at least survey/review papers and relevant to the topic.
+
+
+Respond with ONLY the indices (numbers) of the 3 selected papers (if exists and all valid), separated by commas.
+Example: "0, 3, 7"
+"""
+    
+    res = llm.invoke([HumanMessage(content=selection_prompt)])
+    selected_indices_str = res.content.strip()
+    
+    # Parse the selected indices
+    try:
+        # Extract numbers from the response
+        indices = [int(x.strip()) for x in re.findall(r'\d+', selected_indices_str)]
+        # Take first 3 unique indices
+        selected_indices = []
+        for idx in indices:
+            if idx not in selected_indices and 0 <= idx < len(survey_papers):
+                selected_indices.append(idx)
+                if len(selected_indices) >= 3:
+                    break
+        
+        # If we don't have 3, fill with remaining papers
+        if len(selected_indices) < 3:
+            for i in range(len(survey_papers)):
+                if i not in selected_indices:
+                    selected_indices.append(i)
+                    if len(selected_indices) >= 3:
+                        break
+        
+        selected_papers = [survey_papers[i] for i in selected_indices[:3]]
+        
+        # Display selected papers
+        if selected_papers:
+            print(f"\n   [SELECTED] Top {len(selected_papers)} surveys:")
+            for i, paper in enumerate(selected_papers, 1):
+                year_info = ""
+                if paper.published_date:
+                    year_match = re.search(r'\d{4}', paper.published_date)
+                    if year_match:
+                        year_info = f" ({year_match.group(0)})"
+                print(f"   [{i}] {paper.title[:60]}...{year_info}")
+        
+        return {"survey_papers": selected_papers}
+        
+    except Exception as e:
+        print(f"   [ERROR] Failed to parse selection: {e}")
+        print(f"   [FALLBACK] Using first 3 papers")
+        # Fallback: use first 3 papers
+        return {"survey_papers": survey_papers[:3]}
+
+
 def taxonomy_extractor_node(state: AgentState) -> dict:
     """
-    Extract taxonomy structures from validated survey papers.
+    Extract taxonomy structures from validated survey papers using RAG.
+    Uses semantic search to find taxonomy-related content in papers.
     
     Args:
         state: Current agent state
@@ -187,9 +605,10 @@ def taxonomy_extractor_node(state: AgentState) -> dict:
     Returns:
         Updated state with extracted_taxonomies (list of taxonomy strings)
     """
-    print("\n--- TAXONOMY EXTRACTOR: Extracting taxonomies from surveys ---")
+    print("\n--- TAXONOMY EXTRACTOR: Extracting taxonomies using RAG ---")
     survey_papers = state.get('survey_papers', [])
     extracted_taxonomies = []
+    topic = state.get('topic', '')
     
     if not survey_papers:
         print("   [INFO] No survey papers to extract taxonomies from")
@@ -197,37 +616,80 @@ def taxonomy_extractor_node(state: AgentState) -> dict:
     
     # Process papers (download/read PDFs)
     pdf_folder = state.get('pdf_folder', '')
-    docs = process_papers(survey_papers, pdf_folder)
+    all_docs = process_papers(survey_papers, pdf_folder)
     
-    if not docs:
+    if not all_docs:
         print("   [WARNING] Could not process survey papers for taxonomy extraction")
         return {"extracted_taxonomies": []}
     
     # Group docs by paper title
     papers_docs = {}
-    for doc in docs:
+    for doc in all_docs:
         paper_title = doc.metadata.get('source', 'Unknown')
         if paper_title not in papers_docs:
             papers_docs[paper_title] = []
         papers_docs[paper_title].append(doc)
     
-    # Extract taxonomy from each survey paper
+    # Extract taxonomy from each survey paper using RAG
     for paper in survey_papers:
         paper_docs = papers_docs.get(paper.title, [])
         if not paper_docs:
             print(f"   [SKIP] No content extracted for: {paper.title[:40]}...")
             continue
         
-        # Combine text from this paper
-        paper_text = "\n\n".join([doc.page_content for doc in paper_docs[:5]])  # Limit to first 5 chunks
-        paper_text = paper_text[:5000]  # Limit total length
+        print(f"   [PROCESSING] {paper.title[:50]}...")
+        
+        # Create vector store for this paper's chunks
+        retriever = create_vectorstore(paper_docs)
+        if not retriever:
+            print(f"   [SKIP] Could not create vector store for: {paper.title[:40]}...")
+            continue
+        
+        # Use RAG to find taxonomy-related content
+        # Query for taxonomy-related sections
+        taxonomy_queries = [
+            f"taxonomy classification structure organization {topic}",
+            f"hierarchical categories subcategories {topic}",
+            f"classification scheme categories {topic}",
+            f"method classification categorization {topic}",
+            f"survey organization structure framework {topic}"
+        ]
+        
+        # Retrieve relevant chunks for taxonomy extraction
+        retrieved_chunks = []
+        seen_chunks = set()
+        
+        for query in taxonomy_queries:
+            try:
+                chunks = retriever.invoke(query)
+                for chunk in chunks:
+                    # Deduplicate by content
+                    chunk_key = chunk.page_content[:100]  # Use first 100 chars as key
+                    if chunk_key not in seen_chunks:
+                        retrieved_chunks.append(chunk)
+                        seen_chunks.add(chunk_key)
+            except Exception as e:
+                print(f"   [WARNING] Error retrieving chunks for query '{query}': {e}")
+                continue
+        
+        # If no chunks retrieved, fallback to first few chunks
+        if not retrieved_chunks:
+            print(f"   [FALLBACK] No taxonomy chunks found, using first chunks")
+            retrieved_chunks = paper_docs[:5]
+        
+        # Limit to top 10 most relevant chunks to avoid token limits
+        retrieved_chunks = retrieved_chunks[:10]
+        
+        # Combine retrieved chunks
+        paper_text = "\n\n".join([chunk.page_content for chunk in retrieved_chunks])
+        paper_text = paper_text[:8000]  # Limit total length 
         
         extraction_prompt = f"""Extract the taxonomy, classification, or organizational structure from this survey paper.
 
-Topic: {state['topic']}
+Topic: {topic}
 Paper Title: {paper.title}
 
-Paper Content (excerpt):
+Paper Content (retrieved sections):
 {paper_text}
 
 Look for:
@@ -236,6 +698,7 @@ Look for:
 - Categorization schemes
 - Method classifications
 - Any structured organization of the field
+- Section headings that indicate taxonomy (e.g., "Classification", "Taxonomy", "Categories", "Types of...")
 
 If you find a taxonomy, describe it in a structured format (hierarchical categories and subcategories).
 If no clear taxonomy is found, respond with "NO_TAXONOMY".
@@ -259,7 +722,7 @@ Respond with the taxonomy structure or "NO_TAXONOMY":"""
 
 def taxonomy_designer_node(state: AgentState) -> dict:
     """
-    Design unified taxonomy JSON structure from multiple extracted taxonomies.
+    Design unified taxonomy JSON structure for the specific topic from multiple taxonomies extracted from related survey papers.
     
     Args:
         state: Current agent state
@@ -277,7 +740,7 @@ def taxonomy_designer_node(state: AgentState) -> dict:
 
 Topic: {state['topic']}
 
-Design a taxonomy with main categories and subcategories that would organize research papers in this field.
+Design a taxonomy with main categories and subcategories that would organize research papers in the specific topic.
 Return a JSON structure with this format:
 {{
   "main_categories": [
@@ -304,10 +767,10 @@ Extracted Taxonomies:
 {taxonomy_texts}
 
 Create a unified taxonomy that:
-1. Combines the best elements from each extracted taxonomy
-2. Ensures comprehensive coverage of the research domain
+1. Combines the most relevant elements from each extracted taxonomy
+2. Ensures coverage of the specificresearch domain
 3. Has a clear hierarchical structure
-4. Is suitable for organizing research papers
+4. Is suitable for organizing research papers in the specific topic
 
 Return a JSON structure with this format:
 {{
@@ -788,6 +1251,24 @@ def router(state: AgentState) -> str:
     if state['review_status'] == "PASS" or state['revision_number'] > 2:
         return END
     return "writer"
+
+
+def target_paper_termination_router(state: AgentState) -> str:
+    """
+    Route based on termination check. If terminated, go to END, otherwise continue.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        END if terminated, "sorter" if continuing
+    """
+    workflow_terminated = state.get('workflow_terminated', False)
+    
+    if workflow_terminated:
+        return END
+    else:
+        return "sorter"
 
 
 def sorter_router(state: AgentState) -> str:

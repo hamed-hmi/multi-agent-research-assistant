@@ -49,7 +49,7 @@ class KnowledgeGraph(BaseModel):
     triples: List[KnowledgeTriple]
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     """State shared across all agent nodes."""
     topic: str
     search_sources: List[str]  # ["arxiv"], ["wos"], or ["arxiv", "wos"]
@@ -69,4 +69,12 @@ class AgentState(TypedDict):
     revision_number: int
     reviewer_comments: str
     review_status: str
+    # Feedback mechanism fields
+    survey_query_feedback: str  # Feedback for regenerating survey queries
+    survey_query_retry_count: int  # Number of retries for survey queries
+    min_survey_papers: int  # Minimum number of survey papers needed before validation (default: 5)
+    min_validated_surveys: int  # Minimum number of validated survey papers needed after validation (default: 3)
+    max_survey_query_retries: int  # Maximum retries for survey queries (default: 2)
+    termination_message: str  # Message to display if workflow terminates early
+    workflow_terminated: bool  # Flag indicating if workflow should terminate
 
