@@ -17,7 +17,11 @@ from tools import (
     create_vectorstore,
     build_knowledge_graph,
     analyze_graph_centrality,
-    format_graph_edges
+    format_graph_edges,
+    format_paper_title_with_year,
+    extract_year_from_date,
+    get_or_assign_citation,
+    format_citation
 )
 
 
@@ -292,12 +296,12 @@ def survey_search_node(state: AgentState) -> dict:
     
     if 'arxiv' in sources:
         print("   -> Searching ArXiv for surveys...")
-        arxiv_surveys = search_arxiv(survey_queries, max_results=5)
+        arxiv_surveys = search_arxiv(survey_queries, max_results=10)
         survey_papers.extend(arxiv_surveys)
     
     if 'wos' in sources:
         print("   -> Searching Web of Science for surveys...")
-        wos_surveys = search_wos(survey_queries, max_results=5)
+        wos_surveys = search_wos(survey_queries, max_results=10)
         survey_papers.extend(wos_surveys)
         print(f"   [INFO] Found {len(wos_surveys)} WOS survey papers. PDFs must be provided manually.")
     
@@ -336,12 +340,12 @@ def research_search_node(state: AgentState) -> dict:
     
     if 'arxiv' in sources:
         print("   -> Searching ArXiv for research papers...")
-        arxiv_research = search_arxiv(research_queries, max_results=10)
+        arxiv_research = search_arxiv(research_queries, max_results=20)
         research_papers.extend(arxiv_research)
     
     if 'wos' in sources:
         print("   -> Searching Web of Science for research papers...")
-        wos_research = search_wos(research_queries, max_results=10)
+        wos_research = search_wos(research_queries, max_results=20)
         research_papers.extend(wos_research)
         print(f"   [INFO] Found {len(wos_research)} WOS research papers. PDFs must be provided manually.")
     
@@ -390,17 +394,15 @@ Abstract: {paper.summary}
 Check:
 1. Is it actually a survey/review paper? 
 2. Is it relevant to the topic?
-3. Does it appear to have a taxonomy, classification, or structured organization?
-4. Is it of reasonable quality? (Not too old, not too brief)
 
 Respond with ONLY 'YES' if it should be kept, or 'NO' if it should be excluded."""
         
         res = llm.invoke([HumanMessage(content=validation_prompt)])
         if "YES" in res.content.upper():
             validated.append(paper)
-            print(f"   [KEPT] {paper.title[:50]}...")
+            print(f"   [KEPT] {format_paper_title_with_year(paper)}")
         else:
-            print(f"   [SKIP] {paper.title[:50]}...")
+            print(f"   [SKIP] {format_paper_title_with_year(paper)}")
     
     print(f"\n   [SUMMARY] Validated {len(validated)} out of {len(survey_papers)} survey papers")
     return {"survey_papers": validated}
@@ -497,13 +499,7 @@ def survey_selector_node(state: AgentState) -> dict:
     papers_info = []
     for i, paper in enumerate(survey_papers):
         # Extract year from published_date (could be full date or just year)
-        pub_date = paper.published_date
-        year = "Unknown"
-        if pub_date:
-            # Try to extract year from date string
-            year_match = re.search(r'\d{4}', pub_date)
-            if year_match:
-                year = year_match.group(0)
+        year = extract_year_from_date(paper.published_date)
         
         papers_info.append({
             "index": i,
@@ -578,12 +574,7 @@ Example: "0, 3, 7"
         if selected_papers:
             print(f"\n   [SELECTED] Top {len(selected_papers)} surveys:")
             for i, paper in enumerate(selected_papers, 1):
-                year_info = ""
-                if paper.published_date:
-                    year_match = re.search(r'\d{4}', paper.published_date)
-                    if year_match:
-                        year_info = f" ({year_match.group(0)})"
-                print(f"   [{i}] {paper.title[:60]}...{year_info}")
+                print(f"   [{i}] {format_paper_title_with_year(paper)}")
         
         return {"survey_papers": selected_papers}
         
@@ -634,25 +625,24 @@ def taxonomy_extractor_node(state: AgentState) -> dict:
     for paper in survey_papers:
         paper_docs = papers_docs.get(paper.title, [])
         if not paper_docs:
-            print(f"   [SKIP] No content extracted for: {paper.title[:40]}...")
+            print(f"   [SKIP] No content extracted for: {format_paper_title_with_year(paper)}")
             continue
         
-        print(f"   [PROCESSING] {paper.title[:50]}...")
+        print(f"   [PROCESSING] {format_paper_title_with_year(paper)}")
         
         # Create vector store for this paper's chunks
         retriever = create_vectorstore(paper_docs)
         if not retriever:
-            print(f"   [SKIP] Could not create vector store for: {paper.title[:40]}...")
+            print(f"   [SKIP] Could not create vector store for: {format_paper_title_with_year(paper)}")
             continue
         
         # Use RAG to find taxonomy-related content
         # Query for taxonomy-related sections
         taxonomy_queries = [
-            f"taxonomy classification structure organization {topic}",
-            f"hierarchical categories subcategories {topic}",
-            f"classification scheme categories {topic}",
-            f"method classification categorization {topic}",
-            f"survey organization structure framework {topic}"
+            f"paper structure organization",
+            f"hierarchical categories subcategories",
+            f"taxonomy structure organization",
+            f"categorizing the studies"
         ]
         
         # Retrieve relevant chunks for taxonomy extraction
@@ -684,21 +674,13 @@ def taxonomy_extractor_node(state: AgentState) -> dict:
         paper_text = "\n\n".join([chunk.page_content for chunk in retrieved_chunks])
         paper_text = paper_text[:8000]  # Limit total length 
         
-        extraction_prompt = f"""Extract the taxonomy, classification, or organizational structure from this survey paper.
+        extraction_prompt = f"""Extract the taxonomy, categorization, or organizational structure from this survey paper. How do they categorize their target studies?
 
-Topic: {topic}
 Paper Title: {paper.title}
 
 Paper Content (retrieved sections):
 {paper_text}
 
-Look for:
-- Hierarchical classifications
-- Taxonomy structures
-- Categorization schemes
-- Method classifications
-- Any structured organization of the field
-- Section headings that indicate taxonomy (e.g., "Classification", "Taxonomy", "Categories", "Types of...")
 
 If you find a taxonomy, describe it in a structured format (hierarchical categories and subcategories).
 If no clear taxonomy is found, respond with "NO_TAXONOMY".
@@ -713,16 +695,16 @@ Respond with the taxonomy structure or "NO_TAXONOMY":"""
                 "source_paper": paper.title,
                 "taxonomy": taxonomy_text
             })
-            print(f"   [EXTRACTED] Taxonomy from: {paper.title[:40]}...")
+            print(f"   [EXTRACTED] Taxonomy from: {format_paper_title_with_year(paper)}")
         else:
-            print(f"   [NO_TAXONOMY] {paper.title[:40]}...")
+            print(f"   [NO_TAXONOMY] {format_paper_title_with_year(paper)}")
     
     return {"extracted_taxonomies": extracted_taxonomies}
 
 
 def taxonomy_designer_node(state: AgentState) -> dict:
     """
-    Design unified taxonomy JSON structure for the specific topic from multiple taxonomies extracted from related survey papers.
+    Design unified taxonomy JSON structure for the specific topic by looking at the taxonomies extracted from related survey papers.
     
     Args:
         state: Current agent state
@@ -736,10 +718,10 @@ def taxonomy_designer_node(state: AgentState) -> dict:
     if not extracted_taxonomies:
         print("   [WARNING] No taxonomies extracted, creating from topic")
         # Create a basic taxonomy from the topic
-        design_prompt = f"""Create a hierarchical taxonomy structure for the research topic.
+        design_prompt = f"""You are a research assistant. You want to help specifying the main sections and subsections of a survey paper that categorize the target studies in a specific topic.
 
 Topic: {state['topic']}
-
+    
 Design a taxonomy with main categories and subcategories that would organize research papers in the specific topic.
 Return a JSON structure with this format:
 {{
@@ -759,18 +741,21 @@ Return ONLY valid JSON, no additional text."""
             for t in extracted_taxonomies
         ])
         
-        design_prompt = f"""Design a unified, comprehensive taxonomy for the research topic by combining and refining these extracted taxonomies.
+        design_prompt = f"""You are a research assistant. You want to help specifying the main sections and subsections of a survey paper that categorize the target studies in the specific topic.
 
 Topic: {state['topic']}
+    
+Design a taxonomy with main categories and subcategories that would organize research papers in the specific topic by looking at the taxonomies extracted from some related survey papers. 
+If the related survey papers are not that relevant or only consider one aspect, the priority is the specific topic. Remember we want to categorize the studies that exactly go under the specific topic.
+
 
 Extracted Taxonomies:
 {taxonomy_texts}
 
 Create a unified taxonomy that:
-1. Combines the most relevant elements from each extracted taxonomy
-2. Ensures coverage of the specificresearch domain
-3. Has a clear hierarchical structure
-4. Is suitable for organizing research papers in the specific topic
+1. Ensures coverage of the specific topic and only that.
+2. Has a clear hierarchical structure
+3. Is suitable for organizing research papers in the specific topic
 
 Return a JSON structure with this format:
 {{
@@ -832,7 +817,7 @@ Respond with ONLY 'YES' if it's a survey/review paper, or 'NO' if it's a researc
         is_survey = "YES" in survey_res.content.upper()
         
         if is_survey:
-            print(f"   [SKIP - SURVEY] {paper.title[:40]}...")
+            print(f"   [SKIP - SURVEY] {format_paper_title_with_year(paper)}")
             continue
         
         # Second check: Is it relevant to the topic?
@@ -849,9 +834,9 @@ Respond with ONLY 'YES' if the paper should be included, or 'NO' if it should be
         if "YES" in res.content.upper():
             paper.status = "validated"
             validated.append(paper)
-            print(f"   [KEPT] {paper.title[:40]}...")
+            print(f"   [KEPT] {format_paper_title_with_year(paper)}")
         else:
-            print(f"   [SKIP] {paper.title[:40]}...")
+            print(f"   [SKIP] {format_paper_title_with_year(paper)}")
     
     print(f"\n   [SUMMARY] Validated {len(validated)} out of {len(target_papers)} research papers")
     return {"target_papers": validated}
@@ -888,112 +873,469 @@ def paper_validator_node(state: AgentState) -> dict:
     return {"target_papers": final_papers}
 
 
-# ========== SORTER NODE ==========
+# ========== SUBSECTION WRITING NODES ==========
 
-def sorter_node(state: AgentState) -> dict:
+def taxonomy_parser_node(state: AgentState) -> dict:
     """
-    Organize target papers by taxonomy categories.
+    Parse taxonomy JSON to extract structure with all subcategories.
     Waits for both Survey Track and Paper Track to complete.
     
     Args:
         state: Current agent state
         
     Returns:
-        Updated state with organized_papers dict
+        Updated state with taxonomy_structure
     """
-    target_papers = state.get('target_papers', [])
     taxonomy_json = state.get('taxonomy_json', '')
+    target_papers = state.get('target_papers', [])
     
     # Check if both tracks have completed
-    # Survey track should have produced taxonomy_json
-    # Paper track should have produced target_papers
     if not taxonomy_json or not taxonomy_json.strip():
-        print("\n--- SORTER: Waiting for Survey Track (taxonomy not ready) ---")
+        print("\n--- TAXONOMY PARSER: Waiting for Survey Track (taxonomy not ready) ---")
         return {}  # Return empty update to wait
     
     if not target_papers or len(target_papers) == 0:
-        print("\n--- SORTER: Waiting for Paper Track (papers not ready) ---")
+        print("\n--- TAXONOMY PARSER: Waiting for Paper Track (papers not ready) ---")
         return {}  # Return empty update to wait
     
-    print("\n--- SORTER: Organizing papers by taxonomy ---")
-    print("   [READY] Both tracks completed, organizing papers...")
+    print("\n--- TAXONOMY PARSER: Extracting taxonomy structure ---")
+    print("   [READY] Both tracks completed, parsing taxonomy...")
     
-    # Parse taxonomy to get category names
     try:
         taxonomy_data = json.loads(taxonomy_json)
-        categories = []
-        for main_cat in taxonomy_data.get('main_categories', []):
-            cat_name = main_cat.get('name', '')
-            if cat_name:
-                categories.append(cat_name)
-            for subcat in main_cat.get('subcategories', []):
-                if subcat:
-                    categories.append(subcat)
-    except:
-        print("   [WARNING] Could not parse taxonomy JSON, using text-based matching")
-        categories = []
+        # Store the parsed structure
+        taxonomy_structure = {
+            "main_categories": taxonomy_data.get('main_categories', [])
+        }
+        
+        # Count subcategories
+        total_subcategories = sum(
+            len(cat.get('subcategories', [])) 
+            for cat in taxonomy_structure['main_categories']
+        )
+        
+        print(f"   [SUCCESS] Parsed {len(taxonomy_structure['main_categories'])} main categories with {total_subcategories} subcategories")
+        return {"taxonomy_structure": taxonomy_structure}
+    except json.JSONDecodeError as e:
+        print(f"   [ERROR] Failed to parse taxonomy JSON: {e}")
+        return {"taxonomy_structure": {}}
+
+
+def paper_indexer_node(state: AgentState) -> dict:
+    """
+    Index all target papers into a vector store for RAG.
     
-    organized = {}
-    uncategorized = []
-    
-    # Process each paper
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with paper_retriever and citation_map initialized
+    """
+    print("\n--- PAPER INDEXER: Building vector store from all papers ---")
+    target_papers = state.get('target_papers', [])
     pdf_folder = state.get('pdf_folder', '')
-    for paper in target_papers:
-        # Get paper content for better categorization
-        paper_text = ""
-        if paper.pdf_path and os.path.exists(paper.pdf_path):
-            from tools import read_local_pdf
-            paper_text = read_local_pdf(paper.pdf_path)
-        elif paper.url and paper.source == "arxiv":
-            from tools import download_and_read_pdf
-            paper_text = download_and_read_pdf(paper.url)
-        
-        # Use abstract if no full text
-        if not paper_text:
-            paper_text = paper.summary
-        
-        # Limit text length
-        paper_text = paper_text[:2000] if paper_text else paper.summary
-        
-        # Categorize paper
-        if categories:
-            category_prompt = f"""Categorize this research paper into one of these taxonomy categories.
-
-Taxonomy Categories:
-{chr(10).join([f"- {cat}" for cat in categories])}
-
-Paper Title: {paper.title}
-Paper Abstract/Content: {paper_text[:1000]}
-
-Respond with ONLY the category name that best fits this paper, or "UNCATEGORIZED" if none fit."""
-        else:
-            category_prompt = f"""Based on the taxonomy structure, categorize this research paper.
-
-Taxonomy Structure:
-{taxonomy_json[:500]}
-
-Paper Title: {paper.title}
-Paper Abstract/Content: {paper_text[:1000]}
-
-Respond with ONLY the category name that best fits this paper, or "UNCATEGORIZED" if none fit."""
-        
-        res = llm.invoke([HumanMessage(content=category_prompt)])
-        category = res.content.strip()
-        
-        if category and category.upper() != "UNCATEGORIZED":
-            if category not in organized:
-                organized[category] = []
-            organized[category].append(paper)
-            print(f"   [CATEGORIZED] {paper.title[:40]}... -> {category}")
-        else:
-            uncategorized.append(paper)
-            print(f"   [UNCATEGORIZED] {paper.title[:40]}...")
     
-    if uncategorized:
-        organized["uncategorized"] = uncategorized
+    if not target_papers:
+        print("   [WARNING] No target papers to index")
+        return {"paper_retriever": None, "citation_map": {}}
     
-    print(f"\n   [SUMMARY] Organized {len(target_papers)} papers into {len(organized)} categories")
-    return {"organized_papers": organized}
+    print(f"   -> Processing {len(target_papers)} papers...")
+    
+    # Process all papers into document chunks
+    all_docs = process_papers(target_papers, pdf_folder)
+    
+    if not all_docs:
+        print("   [WARNING] No documents extracted from papers")
+        return {"paper_retriever": None, "citation_map": {}}
+    
+    print(f"   -> Created {len(all_docs)} document chunks")
+    
+    # Create vector store
+    retriever = create_vectorstore(all_docs)
+    
+    # Initialize citation map (empty, will be populated as papers are cited)
+    citation_map = {}
+    
+    print(f"   [SUCCESS] Indexed {len(target_papers)} papers into vector store")
+    return {
+        "paper_retriever": retriever,
+        "citation_map": citation_map
+    }
+
+
+def subsection_writer_node(state: AgentState) -> dict:
+    """
+    Write a subsection for a specific subcategory using RAG to find relevant papers.
+    This node processes one subcategory at a time.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with subsection content added to subsections dict
+    """
+    print("\n--- SUBSECTION WRITER: Writing subsection content ---")
+    
+    topic = state.get('topic', '')
+    taxonomy_structure = state.get('taxonomy_structure', {})
+    paper_retriever = state.get('paper_retriever')
+    citation_map = state.get('citation_map', {})
+    subsections = state.get('subsections', {})
+    target_papers = state.get('target_papers', [])
+    
+    # Get current subcategory to process (stored in state)
+    current_subcategory = state.get('current_subcategory', '')
+    current_category = state.get('current_category', '')
+    
+    if not current_subcategory:
+        print("   [WARNING] No current subcategory specified")
+        return {}
+    
+    if not paper_retriever:
+        print("   [WARNING] No paper retriever available")
+        return {}
+    
+    print(f"   -> Writing subsection for: {current_subcategory}")
+    
+    # Use RAG to find relevant papers for this subcategory
+    queries = [
+        f"{current_subcategory} {topic}",
+        f"{current_subcategory} approach method",
+        f"{current_subcategory} technique",
+        f"{current_subcategory} implementation",
+        f"{current_subcategory} application"
+    ]
+    
+    # Retrieve relevant chunks
+    all_relevant_chunks = []
+    seen_sources = set()
+    
+    for query in queries:
+        try:
+            retrieved = paper_retriever.invoke(query)
+            for chunk in retrieved:
+                source = chunk.metadata.get('source', '')
+                if source and source not in seen_sources:
+                    all_relevant_chunks.append(chunk)
+                    seen_sources.add(source)
+        except Exception as e:
+            print(f"   [WARNING] Error retrieving for query '{query}': {e}")
+            continue
+    
+    # Limit total chunks to avoid token overflow (keep within 8000 chars)
+    combined_text = ""
+    selected_chunks = []
+    for chunk in all_relevant_chunks[:20]:  # Limit to 20 chunks
+        if len(combined_text) + len(chunk.page_content) < 8000:
+            combined_text += chunk.page_content + "\n\n"
+            selected_chunks.append(chunk)
+        else:
+            break
+    
+    # Extract unique paper titles from chunks
+    relevant_paper_titles = list(set(
+        chunk.metadata.get('source', '') 
+        for chunk in selected_chunks 
+        if chunk.metadata.get('source', '')
+    ))
+    
+    # Validation: Check if any relevant papers were found
+    if not relevant_paper_titles or not selected_chunks:
+        print(f"   [SKIP] No relevant papers found for subcategory '{current_subcategory}' - skipping subsection")
+        return {}
+    
+    # Validation: Check if subcategory is appropriate (not metadata)
+    metadata_keywords = ['year', 'publication year', 'author', 'journal', 'conference', 'venue', 
+                         'affiliation', 'institution', 'geographic', 'region', 'country',
+                         'publication type', 'paper type', 'first author', 'last author']
+    subcategory_lower = current_subcategory.lower()
+    if any(keyword in subcategory_lower for keyword in metadata_keywords):
+        print(f"   [SKIP] Subcategory '{current_subcategory}' appears to be metadata - skipping subsection")
+        return {}
+    
+    # Get or assign citations for relevant papers
+    cited_papers = []
+    citation_refs = []
+    for paper_title in relevant_paper_titles:
+        # Find the paper object
+        paper_obj = next((p for p in target_papers if p.title == paper_title), None)
+        if paper_obj:
+            cit_num = get_or_assign_citation(citation_map, paper_title)
+            cited_papers.append((paper_obj, cit_num))
+            citation_refs.append(f"[{cit_num}]")
+    
+    # Generate subsection content
+    papers_list = "\n".join([
+        f"- {format_paper_title_with_year(paper)} {format_citation(cit_num)}"
+        for paper, cit_num in cited_papers
+    ]) if cited_papers else "No specific papers found."
+    
+    subsection_prompt = f"""Write a detailed subsection for a survey paper about "{topic}".
+
+Category: {current_category}
+Subcategory: {current_subcategory}
+
+Relevant content from papers:
+{combined_text[:6000] if combined_text else "No specific content found."}
+
+Relevant papers that use this approach:
+{papers_list}
+
+Write a comprehensive subsection that:
+1. Defines/explains what "{current_subcategory}" means in the context of {topic}
+2. Describes how papers use this approach/method
+3. Provides specific details from the relevant papers
+4. Uses citations in the format [1], [2], etc. for each paper mentioned
+5. Is written in academic style suitable for a survey paper
+
+Format the output as markdown with a level 3 heading (###) for the subcategory name, followed by the content.
+
+Return ONLY the markdown content, starting with the heading."""
+    
+    res = llm.invoke([HumanMessage(content=subsection_prompt)])
+    subsection_content = res.content.strip()
+    
+    # Store subsection
+    subsections[current_subcategory] = subsection_content
+    
+    print(f"   [SUCCESS] Wrote subsection for {current_subcategory} ({len(subsection_content)} chars, {len(cited_papers)} papers cited)")
+    
+    return {
+        "subsections": subsections,
+        "citation_map": citation_map
+    }
+
+
+def section_writer_node(state: AgentState) -> dict:
+    """
+    Write a section introduction for a main category.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with section content added to sections dict
+    """
+    print("\n--- SECTION WRITER: Writing section introduction ---")
+    
+    topic = state.get('topic', '')
+    taxonomy_structure = state.get('taxonomy_structure', {})
+    sections = state.get('sections', {})
+    
+    # Get current category to process
+    current_category = state.get('current_category', '')
+    
+    if not current_category:
+        print("   [WARNING] No current category specified")
+        return {}
+    
+    # Find subcategories for this category
+    subcategories = []
+    for main_cat in taxonomy_structure.get('main_categories', []):
+        if main_cat.get('name') == current_category:
+            subcategories = main_cat.get('subcategories', [])
+            break
+    
+    # Validation: Check if category is appropriate (not metadata)
+    metadata_keywords = ['year', 'publication year', 'author', 'journal', 'conference', 'venue',
+                         'affiliation', 'institution', 'geographic', 'region', 'country',
+                         'publication type', 'paper type', 'first author', 'last author']
+    category_lower = current_category.lower()
+    if any(keyword in category_lower for keyword in metadata_keywords):
+        print(f"   [SKIP] Category '{current_category}' appears to be metadata - skipping section")
+        return {}
+    
+    # Validation: Check if there are written subsections for this category
+    subsections = state.get('subsections', {})
+    written_subsections = [subcat for subcat in subcategories if subcat in subsections]
+    if not written_subsections:
+        print(f"   [SKIP] No written subsections found for category '{current_category}' - skipping section")
+        return {}
+    
+    print(f"   -> Writing section introduction for: {current_category}")
+    
+    # Only list subsections that were actually written
+    subcategories_list = "\n".join([f"- {subcat}" for subcat in written_subsections])
+    
+    section_prompt = f"""Write a section introduction for a survey paper about "{topic}".
+
+Category: {current_category}
+
+Subcategories covered in this section:
+{subcategories_list}
+
+Write a comprehensive section introduction that:
+1. Provides an overview of the {current_category} category
+2. Explains its importance/relevance to {topic}
+3. Mentions the subcategories that will be covered
+4. Sets the context for the detailed subsections that follow
+5. Is written in academic style suitable for a survey paper
+
+Format the output as markdown with a level 2 heading (##) for the category name, followed by the introduction.
+
+Return ONLY the markdown content, starting with the heading."""
+    
+    res = llm.invoke([HumanMessage(content=section_prompt)])
+    section_content = res.content.strip()
+    
+    # Store section
+    sections[current_category] = section_content
+    
+    print(f"   [SUCCESS] Wrote section introduction for {current_category} ({len(section_content)} chars)")
+    
+    return {"sections": sections}
+
+
+def report_assembler_node(state: AgentState) -> dict:
+    """
+    Assemble all sections and subsections into a final markdown report.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state with final_report
+    """
+    print("\n--- REPORT ASSEMBLER: Combining all sections into final report ---")
+    
+    topic = state.get('topic', '')
+    taxonomy_structure = state.get('taxonomy_structure', {})
+    sections = state.get('sections', {})
+    subsections = state.get('subsections', {})
+    citation_map = state.get('citation_map', {})
+    target_papers = state.get('target_papers', [])
+    
+    # Build report
+    report_parts = []
+    
+    # Title
+    report_parts.append(f"# Survey: {topic}\n\n")
+    
+    # Introduction (brief)
+    report_parts.append("## Introduction\n\n")
+    intro_prompt = f"""Write a brief introduction for a survey paper about "{topic}".
+
+This introduction should:
+1. Introduce the topic and its importance
+2. Explain the scope of the survey
+3. Provide an overview of the taxonomy structure
+4. Be concise (2-3 paragraphs)
+
+Return ONLY the introduction text, no heading."""
+    
+    intro_res = llm.invoke([HumanMessage(content=intro_prompt)])
+    report_parts.append(intro_res.content.strip())
+    report_parts.append("\n\n")
+    
+    # Add sections and subsections in order
+    for main_cat in taxonomy_structure.get('main_categories', []):
+        cat_name = main_cat.get('name', '')
+        if not cat_name:
+            continue
+        
+        # Add section introduction
+        if cat_name in sections:
+            report_parts.append(sections[cat_name])
+            report_parts.append("\n\n")
+        
+        # Add subsections
+        for subcat in main_cat.get('subcategories', []):
+            if subcat in subsections:
+                report_parts.append(subsections[subcat])
+                report_parts.append("\n\n")
+    
+    # Add references section
+    report_parts.append("## References\n\n")
+    
+    # Sort papers by citation number
+    cited_papers = [
+        (title, cit_num) 
+        for title, cit_num in citation_map.items()
+    ]
+    cited_papers.sort(key=lambda x: x[1])
+    
+    for title, cit_num in cited_papers:
+        paper = next((p for p in target_papers if p.title == title), None)
+        if paper:
+            year = extract_year_from_date(paper.published_date)
+            if paper.doi:
+                report_parts.append(f"[{cit_num}] {paper.title} ({year}). DOI: {paper.doi}\n\n")
+            elif paper.url:
+                report_parts.append(f"[{cit_num}] {paper.title} ({year}). URL: {paper.url}\n\n")
+            else:
+                report_parts.append(f"[{cit_num}] {paper.title} ({year})\n\n")
+    
+    final_report = "".join(report_parts)
+    
+    print(f"   [SUCCESS] Assembled final report ({len(final_report)} characters, {len(cited_papers)} references)")
+    
+    return {"final_report": final_report}
+
+
+def subsection_coordinator_node(state: AgentState) -> dict:
+    """
+    Coordinate the writing of all sections and subsections.
+    Processes all categories and subcategories sequentially.
+    
+    Args:
+        state: Current agent state
+        
+    Returns:
+        Updated state indicating completion
+    """
+    print("\n--- SUBSECTION COORDINATOR: Processing all categories and subcategories ---")
+    
+    taxonomy_structure = state.get('taxonomy_structure', {})
+    sections = state.get('sections', {})
+    subsections = state.get('subsections', {})
+    
+    # Process each main category
+    for main_cat in taxonomy_structure.get('main_categories', []):
+        cat_name = main_cat.get('name', '')
+        if not cat_name:
+            continue
+        
+        print(f"\n   -> Processing category: {cat_name}")
+        
+        # Process each subcategory first
+        valid_subsections_count = 0
+        for subcat in main_cat.get('subcategories', []):
+            if not subcat:
+                continue
+            
+            print(f"      -> Processing subcategory: {subcat}")
+            
+            # Write subsection if not already written
+            if subcat not in subsections:
+                # Update state with current subcategory
+                state['current_category'] = cat_name
+                state['current_subcategory'] = subcat
+                subsection_result = subsection_writer_node(state)
+                # Check if subsection was actually written (not skipped)
+                if subsection_result and subcat in subsection_result.get('subsections', {}):
+                    subsections.update(subsection_result.get('subsections', {}))
+                    state.update(subsection_result)
+                    valid_subsections_count += 1
+            else:
+                # Subsection already exists (was written previously)
+                valid_subsections_count += 1
+        
+        # Only write section introduction if we have valid subsections
+        if valid_subsections_count > 0 and cat_name not in sections:
+            # Update state with current category
+            state['current_category'] = cat_name
+            section_result = section_writer_node(state)
+            # Check if section was actually written (not skipped)
+            if section_result and cat_name in section_result.get('sections', {}):
+                sections.update(section_result.get('sections', {}))
+                state.update(section_result)
+    
+    print(f"\n   [SUCCESS] Processed {len(sections)} sections and {len(subsections)} subsections")
+    
+    return {
+        "sections": sections,
+        "subsections": subsections
+    }
 
 
 def filter_node(state: AgentState) -> dict:
@@ -1024,7 +1366,7 @@ Respond with ONLY 'YES' if it's a survey/review paper, or 'NO' if it's a researc
         is_survey = "YES" in survey_res.content.upper()
         
         if is_survey:
-            print(f"   [SKIP - SURVEY] {paper.title[:40]}...")
+            print(f"   [SKIP - SURVEY] {format_paper_title_with_year(paper)}")
             continue
         
         # Second check: Is it relevant to the topic?
@@ -1041,9 +1383,9 @@ Respond with ONLY 'YES' if the paper should be included, or 'NO' if it should be
         if "YES" in res.content.upper():
             paper.status = "kept"
             filtered.append(paper)
-            print(f"   [KEPT] {paper.title[:40]}...")
+            print(f"   [KEPT] {format_paper_title_with_year(paper)}")
         else:
-            print(f"   [SKIP] {paper.title[:40]}...")
+            print(f"   [SKIP] {format_paper_title_with_year(paper)}")
     
     return {"papers": filtered}
 
@@ -1076,7 +1418,7 @@ def wos_pause_node(state: AgentState) -> dict:
         print("-"*80)
         
         for i, paper in enumerate(wos_papers, 1):
-            print(f"\n[{i}] {paper.title}")
+            print(f"\n[{i}] {format_paper_title_with_year(paper)}")
             if paper.doi:
                 print(f"    DOI: {paper.doi}")
             if paper.published_date:
@@ -1268,30 +1610,7 @@ def target_paper_termination_router(state: AgentState) -> str:
     if workflow_terminated:
         return END
     else:
-        return "sorter"
+        return "taxonomy_parser"
 
 
-def sorter_router(state: AgentState) -> str:
-    """
-    Route to sorter only when both tracks are complete.
-    
-    Args:
-        state: Current agent state
-        
-    Returns:
-        "sorter" if both tracks ready, "wait" otherwise
-    """
-    taxonomy_json = state.get('taxonomy_json', '')
-    target_papers = state.get('target_papers', [])
-    
-    # Check if both tracks have completed
-    has_taxonomy = bool(taxonomy_json and taxonomy_json.strip())
-    has_papers = bool(target_papers and len(target_papers) > 0)
-    
-    if has_taxonomy and has_papers:
-        return "sorter"
-    else:
-        # Return to wait - but we need a wait node or loop back
-        # For now, just go to sorter and let it handle partial state
-        return "sorter"
 

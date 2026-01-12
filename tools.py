@@ -1,15 +1,23 @@
 """Utility tools for searching, downloading, and processing papers."""
 import os
 import time
+import re
 import requests
 import fitz  # PyMuPDF
 import arxiv
 import networkx as nx
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pathlib import Path
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
+
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
 
 from models import Paper, KnowledgeGraph
 from config import llm, embeddings
@@ -23,7 +31,7 @@ WOS_BASE_URL = "https://api.clarivate.com/api/wos"
 _last_wos_call_time = 0.0
 
 
-def search_wos(queries: List[str], max_results: int = 3) -> List[Paper]:
+def search_wos(queries: List[str], max_results: int = 6) -> List[Paper]:
     """
     Search Web of Science for papers using the WOS Starter API.
     Includes rate limiting to respect the 1 query per second API limit.
@@ -121,7 +129,7 @@ def search_wos(queries: List[str], max_results: int = 3) -> List[Paper]:
     return list(unique_papers.values())
 
 
-def search_arxiv(queries: List[str], max_results: int = 3) -> List[Paper]:
+def search_arxiv(queries: List[str], max_results: int = 6) -> List[Paper]:
     """
     Search ArXiv for papers based on queries.
     
@@ -375,4 +383,223 @@ def format_graph_edges(G: nx.DiGraph) -> str:
     
     # Return the top 20 relationships to save tokens
     return "\n".join(edge_strings[:20])
+
+
+def extract_year_from_date(date_str: str) -> str:
+    """
+    Extract year from a date string.
+    
+    Args:
+        date_str: Date string (could be full date or just year)
+        
+    Returns:
+        Year as string, or "Unknown" if not found
+    """
+    if not date_str:
+        return "Unknown"
+    year_match = re.search(r'\d{4}', date_str)
+    if year_match:
+        return year_match.group(0)
+    return "Unknown"
+
+
+def format_paper_title_with_year(paper: Paper) -> str:
+    """
+    Format paper title with publication year.
+    
+    Args:
+        paper: Paper object
+        
+    Returns:
+        Formatted string: "Title (Year)" or "Title" if year not available
+    """
+    year = extract_year_from_date(paper.published_date)
+    if year != "Unknown":
+        return f"{paper.title} ({year})"
+    return paper.title
+
+
+def get_or_assign_citation(citation_map: dict, paper_title: str) -> int:
+    """
+    Get existing citation number for a paper or assign a new one.
+    
+    Args:
+        citation_map: Dictionary mapping paper titles to citation numbers
+        paper_title: Title of the paper
+        
+    Returns:
+        Citation number (int)
+    """
+    if paper_title not in citation_map:
+        # Assign next available number
+        next_num = len(citation_map) + 1
+        citation_map[paper_title] = next_num
+    return citation_map[paper_title]
+
+
+def format_citation(citation_number: int) -> str:
+    """
+    Format citation number as [N].
+    
+    Args:
+        citation_number: Citation number
+        
+    Returns:
+        Formatted citation string like "[1]"
+    """
+    return f"[{citation_number}]"
+
+
+def visualize_categorization_graph(state: Dict, output_file: str = "categorization_graph.png") -> Optional[str]:
+    """
+    Create a visual NetworkX graph showing categories, subcategories, and papers.
+    
+    Args:
+        state: AgentState dictionary
+        output_file: Path to save the visualization image
+        
+    Returns:
+        Path to saved file if successful, None otherwise
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        print("   [WARNING] matplotlib not available, skipping graph visualization")
+        return None
+    
+    taxonomy_structure = state.get('taxonomy_structure', {})
+    subsections = state.get('subsections', {})
+    citation_map = state.get('citation_map', {})
+    target_papers = state.get('target_papers', [])
+    
+    if not taxonomy_structure or not subsections:
+        print("   [WARNING] No taxonomy or subsections found for visualization")
+        return None
+    
+    # Build reverse mapping: citation number -> paper
+    citation_to_paper = {}
+    for paper_title, cit_num in citation_map.items():
+        paper = next((p for p in target_papers if p.title == paper_title), None)
+        if paper:
+            citation_to_paper[cit_num] = paper
+    
+    # Extract papers from each subsection by parsing citations
+    subcategory_papers = {}
+    for subcat, content in subsections.items():
+        # Find all citations like [1], [2], etc.
+        citations = re.findall(r'\[(\d+)\]', content)
+        paper_nums = [int(c) for c in citations]
+        papers = [citation_to_paper[num] for num in paper_nums if num in citation_to_paper]
+        subcategory_papers[subcat] = papers
+    
+    # Create NetworkX graph
+    G = nx.DiGraph()
+    
+    # Add topic as root node
+    topic = state.get('topic', 'Survey Topic')
+    G.add_node(topic, node_type='topic', size=2000)
+    
+    # Add categories, subcategories, and papers
+    for main_cat in taxonomy_structure.get('main_categories', []):
+        cat_name = main_cat.get('name', '')
+        subcategories = main_cat.get('subcategories', [])
+        
+        # Only include category if it has written subsections
+        written_subsections = [sc for sc in subcategories if sc in subsections]
+        if not written_subsections:
+            continue
+        
+        # Add category node
+        G.add_node(cat_name, node_type='category', size=1500)
+        G.add_edge(topic, cat_name)
+        
+        # Add subcategories and papers
+        for subcat in written_subsections:
+            papers = subcategory_papers.get(subcat, [])
+            
+            # Add subcategory node
+            G.add_node(subcat, node_type='subcategory', size=1000, paper_count=len(papers))
+            G.add_edge(cat_name, subcat)
+            
+            # Add paper nodes
+            for paper in papers:
+                # Truncate long titles for display
+                display_title = paper.title[:50] + "..." if len(paper.title) > 50 else paper.title
+                year = extract_year_from_date(paper.published_date)
+                cit_num = citation_map.get(paper.title, '?')
+                paper_label = f"[{cit_num}] {display_title}"
+                
+                G.add_node(paper_label, node_type='paper', size=500, year=year)
+                G.add_edge(subcat, paper_label)
+    
+    if len(G.nodes) == 0:
+        print("   [WARNING] No nodes to visualize")
+        return None
+    
+    # Create visualization
+    plt.figure(figsize=(24, 16))
+    
+    # Use hierarchical layout - try different layouts for better visualization
+    try:
+        # Try to use a hierarchical layout if possible
+        # For tree-like structures, spring layout with good parameters works well
+        pos = nx.spring_layout(G, k=3, iterations=100, seed=42)
+    except:
+        try:
+            pos = nx.spring_layout(G, k=2, iterations=50, seed=42)
+        except:
+            pos = nx.spring_layout(G, seed=42)
+    
+    # Separate nodes by type
+    topic_nodes = [n for n, d in G.nodes(data=True) if d.get('node_type') == 'topic']
+    category_nodes = [n for n, d in G.nodes(data=True) if d.get('node_type') == 'category']
+    subcategory_nodes = [n for n, d in G.nodes(data=True) if d.get('node_type') == 'subcategory']
+    paper_nodes = [n for n, d in G.nodes(data=True) if d.get('node_type') == 'paper']
+    
+    # Draw nodes with different colors and sizes
+    nx.draw_networkx_nodes(G, pos, nodelist=topic_nodes, node_color='#FF6B6B', 
+                           node_size=2000, alpha=0.9, node_shape='s')
+    nx.draw_networkx_nodes(G, pos, nodelist=category_nodes, node_color='#4ECDC4', 
+                           node_size=1500, alpha=0.9, node_shape='o')
+    nx.draw_networkx_nodes(G, pos, nodelist=subcategory_nodes, node_color='#95E1D3', 
+                           node_size=1000, alpha=0.8, node_shape='^')
+    nx.draw_networkx_nodes(G, pos, nodelist=paper_nodes, node_color='#FFE66D', 
+                           node_size=500, alpha=0.7, node_shape='s')
+    
+    # Draw edges
+    nx.draw_networkx_edges(G, pos, edge_color='gray', alpha=0.3, arrows=True, 
+                           arrowsize=15, arrowstyle='->', width=1.5)
+    
+    # Draw labels with smaller font
+    labels = {}
+    for node in G.nodes():
+        # Truncate long labels
+        if len(node) > 40:
+            labels[node] = node[:37] + "..."
+        else:
+            labels[node] = node
+    
+    nx.draw_networkx_labels(G, pos, labels, font_size=8, font_weight='bold')
+    
+    # Add legend
+    legend_elements = [
+        mpatches.Patch(color='#FF6B6B', label='Topic'),
+        mpatches.Patch(color='#4ECDC4', label='Category'),
+        mpatches.Patch(color='#95E1D3', label='Subcategory'),
+        mpatches.Patch(color='#FFE66D', label='Paper')
+    ]
+    plt.legend(handles=legend_elements, loc='upper left', fontsize=10)
+    
+    plt.title(f"Taxonomy Categorization: {topic}", fontsize=16, fontweight='bold', pad=20)
+    plt.axis('off')
+    plt.tight_layout()
+    
+    # Save figure
+    try:
+        plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+        print(f"   [SUCCESS] Categorization graph saved to: {output_file}")
+        return output_file
+    except Exception as e:
+        print(f"   [ERROR] Failed to save graph: {e}")
+        plt.close()
+        return None
 

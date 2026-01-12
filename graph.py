@@ -19,7 +19,10 @@ from nodes import (
     paper_validator_node,
     target_paper_termination_check_node,
     target_paper_termination_router,
-    sorter_node
+    taxonomy_parser_node,
+    paper_indexer_node,
+    subsection_coordinator_node,
+    report_assembler_node
 )
 
 
@@ -30,11 +33,14 @@ def build_workflow() -> StateGraph:
     Survey Path: 
         survey_query_planner → survey_search → feedback_check → (retry OR continue) → 
         survey_selector (select & validate top 3) → validation_feedback_check → 
-        (retry OR continue) → taxonomy → sorter
+        (retry OR continue) → taxonomy_extractor → taxonomy_designer → taxonomy_parser
     
     Research Path: 
         research_query_planner → research_search → relevance_judge → validator → 
-        termination_check → (END OR sorter)
+        termination_check → (END OR taxonomy_parser)
+    
+    Convergence:
+        taxonomy_parser → paper_indexer → subsection_coordinator → report_assembler → END
     
     Returns:
         Compiled workflow application
@@ -60,8 +66,11 @@ def build_workflow() -> StateGraph:
     workflow.add_node("paper_validator", paper_validator_node)
     workflow.add_node("target_paper_termination_check", target_paper_termination_check_node)
     
-    # Convergence node
-    workflow.add_node("sorter", sorter_node)
+    # Subsection writing nodes
+    workflow.add_node("taxonomy_parser", taxonomy_parser_node)
+    workflow.add_node("paper_indexer", paper_indexer_node)
+    workflow.add_node("subsection_coordinator", subsection_coordinator_node)
+    workflow.add_node("report_assembler", report_assembler_node)
     
     # Set entry point - split into two parallel paths
     workflow.set_entry_point("initial_split")
@@ -97,7 +106,7 @@ def build_workflow() -> StateGraph:
         }
     )
     workflow.add_edge("taxonomy_extractor", "taxonomy_designer")
-    workflow.add_edge("taxonomy_designer", "sorter")
+    workflow.add_edge("taxonomy_designer", "taxonomy_parser")
     
     # Research Track flow (runs in parallel with survey track)
     workflow.add_edge("research_query_planner", "research_search")
@@ -105,18 +114,22 @@ def build_workflow() -> StateGraph:
     workflow.add_edge("relevance_judge", "paper_validator")
     workflow.add_edge("paper_validator", "target_paper_termination_check")
     
-    # Termination check routing: terminate or continue to sorter
+    # Termination check routing: terminate or continue to taxonomy_parser
     workflow.add_conditional_edges(
         "target_paper_termination_check",
         target_paper_termination_router,
         {
             END: END,  # Terminate if insufficient papers
-            "sorter": "sorter"  # Continue to sorter if enough papers
+            "taxonomy_parser": "taxonomy_parser"  # Continue to subsection writing if enough papers
         }
     )
     
-    # End after sorter
-    workflow.add_edge("sorter", END)
+    # Convergence: Both tracks lead to taxonomy_parser, then subsection writing
+    # Note: taxonomy_parser will wait if either taxonomy_json or target_papers are missing
+    workflow.add_edge("taxonomy_parser", "paper_indexer")
+    workflow.add_edge("paper_indexer", "subsection_coordinator")
+    workflow.add_edge("subsection_coordinator", "report_assembler")
+    workflow.add_edge("report_assembler", END)
     
     # Compile and return
     return workflow.compile()

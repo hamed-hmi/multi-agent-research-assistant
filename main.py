@@ -3,6 +3,7 @@ import os
 import sys
 from datetime import datetime
 from graph import app
+from tools import visualize_categorization_graph
 
 # --- MAIN ---
 
@@ -99,7 +100,12 @@ if __name__ == "__main__":
             "taxonomy": "",  # Legacy field
             "extracted_taxonomies": [],  # Will be set by taxonomy_extractor
             "taxonomy_json": "",  # Will be set by taxonomy_designer
-            "organized_papers": {},  # Will be set by sorter
+            "taxonomy_structure": {},  # Will be set by taxonomy_parser
+            "paper_retriever": None,  # Will be set by paper_indexer
+            "citation_map": {},  # Will be set by paper_indexer
+            "subsections": {},  # Will be set by subsection_writer
+            "sections": {},  # Will be set by section_writer
+            "final_report": "",  # Will be set by report_assembler
             "revision_number": 0, 
             "reviewer_comments": "None",
             "review_status": "START"
@@ -117,27 +123,38 @@ if __name__ == "__main__":
             print("\n--- TAXONOMY ---")
             print("No taxonomy generated.")
         
-        # Display Organized Papers
-        organized_papers = final_state.get('organized_papers', {})
-        if organized_papers:
-            print("\n--- ORGANIZED PAPERS BY CATEGORY ---")
-            for category, papers in organized_papers.items():
-                print(f"\n[{category}] ({len(papers)} papers)")
-                for i, paper in enumerate(papers, 1):
-                    print(f"  {i}. {paper.title}")
-                    if paper.doi:
-                        print(f"     DOI: {paper.doi}")
+        # Display Final Report
+        final_report = final_state.get('final_report', '')
+        if final_report:
+            print("\n--- FINAL SURVEY REPORT ---")
+            print(final_report)
+            
+            # Also save report to a separate file
+            report_file = f"survey_report_{timestamp}.md"
+            with open(report_file, 'w', encoding='utf-8') as f:
+                f.write(final_report)
+            print(f"\n[INFO] Full report saved to: {report_file}")
         else:
-            print("\n--- ORGANIZED PAPERS ---")
-            print("No papers organized.")
+            print("\n--- FINAL SURVEY REPORT ---")
+            print("No report generated.")
         
         # Display Summary
         print("\n--- SUMMARY ---")
         print(f"Survey Papers Found: {len(final_state.get('survey_papers', []))}")
         print(f"Target Papers Validated: {len(final_state.get('target_papers', []))}")
-        print(f"Categories Created: {len(organized_papers)}")
-        total_organized = sum(len(papers) for papers in organized_papers.values())
-        print(f"Total Papers Organized: {total_organized}")
+        sections = final_state.get('sections', {})
+        subsections = final_state.get('subsections', {})
+        print(f"Sections Written: {len(sections)}")
+        print(f"Subsections Written: {len(subsections)}")
+        citation_map = final_state.get('citation_map', {})
+        print(f"Papers Cited: {len(citation_map)}")
+        
+        # Generate categorization visualization
+        print("\n--- GENERATING CATEGORIZATION VISUALIZATION ---")
+        graph_file = f"categorization_graph_{timestamp}.png"
+        graph_path = visualize_categorization_graph(final_state, graph_file)
+        if graph_path:
+            print(f"[INFO] Categorization graph saved to: {graph_path}")
         
         print("\n" + "="*80)
         print(f"\n[INFO] All output saved to: {output_file}")

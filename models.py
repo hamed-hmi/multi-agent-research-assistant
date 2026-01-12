@@ -63,7 +63,11 @@ class AgentState(TypedDict, total=False):
     taxonomy: str  # Legacy field, kept for compatibility
     extracted_taxonomies: List[dict]  # Extracted taxonomies from survey papers: [{"source_paper": str, "taxonomy": str}]
     taxonomy_json: str  # Final taxonomy in JSON format
-    organized_papers: dict  # Papers organized by taxonomy category: {category: [paper1, paper2, ...]}
+    taxonomy_structure: dict  # Parsed taxonomy structure: {"main_categories": [{"name": str, "subcategories": [str]}]}
+    paper_retriever: object  # Vector store retriever for RAG (from create_vectorstore)
+    citation_map: dict  # Paper title → citation number: {paper_title: int}
+    subsections: dict  # Subcategory → markdown content: {subcategory: str}
+    sections: dict  # Category → markdown content: {category: str}
     future_directions: str
     final_report: str
     revision_number: int
