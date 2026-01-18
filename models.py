@@ -49,6 +49,14 @@ class KnowledgeGraph(BaseModel):
     triples: List[KnowledgeTriple]
 
 
+class SelectionQualityScore(BaseModel):
+    """Quality score for survey paper selection."""
+    score: float = Field(description="Overall quality score from 0.0 to 1.0", ge=0.0, le=1.0)
+    reasoning: str = Field(description="Explanation of the score and areas for improvement")
+    strengths: List[str] = Field(description="What makes this selection good")
+    weaknesses: List[str] = Field(description="What could be improved in this selection")
+
+
 class AgentState(TypedDict, total=False):
     """State shared across all agent nodes."""
     topic: str
@@ -75,10 +83,16 @@ class AgentState(TypedDict, total=False):
     review_status: str
     # Feedback mechanism fields
     survey_query_feedback: str  # Feedback for regenerating survey queries
-    survey_query_retry_count: int  # Number of retries for survey queries
+    survey_selector_feedback: str  # Feedback for improving survey selection (without re-searching)
+    survey_search_retry_count: int  # Number of retries for survey search feedback loop (after initial search)
+    survey_validation_retry_count: int  # Number of retries for survey validation feedback loop (after selection)
+    survey_selector_retry_count: int  # Number of retries for survey selector feedback loop (quality-based)
     min_survey_papers: int  # Minimum number of survey papers needed before validation (default: 5)
     min_validated_surveys: int  # Minimum number of validated survey papers needed after validation (default: 3)
+    survey_selection_quality_threshold: float  # Minimum quality score for selection (default: 0.7)
     max_survey_query_retries: int  # Maximum retries for survey queries (default: 2)
     termination_message: str  # Message to display if workflow terminates early
     workflow_terminated: bool  # Flag indicating if workflow should terminate
-
+    # Temporary fields for subsection writing
+    current_category: str  # Current category being processed
+    current_subcategory: str  # Current subcategory being processed

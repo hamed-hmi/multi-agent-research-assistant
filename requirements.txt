@@ -11,3 +11,5 @@ pymupdf
 arxiv
 python-dotenv
 tiktoken
+requests
+matplotlib
